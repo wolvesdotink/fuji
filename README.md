@@ -2,6 +2,9 @@
 
 A fast, focused desktop app for culling and importing photos from Fuji cameras. Connect your camera, rate your keepers, and import — all without leaving the app.
 
+- **Project website:** [wolves.ink/projects/fuji](https://wolves.ink/projects/fuji)
+- **Wolves:** [wolves.ink](https://wolves.ink)
+
 ---
 
 ## Features
