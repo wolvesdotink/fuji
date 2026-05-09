@@ -1,0 +1,37 @@
+{
+  "name": "fuji-culler",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "bump:patch": "./scripts/bump.sh patch",
+    "bump:minor": "./scripts/bump.sh minor",
+    "bump:major": "./scripts/bump.sh major"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "pinia": "^3.0.2",
+    "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/plugin-shell": "^2.2.1",
+    "@tauri-apps/plugin-dialog": "^2.2.1",
+    "@tauri-apps/plugin-fs": "^2.2.1",
+    "@tauri-apps/plugin-updater": "^2.0.0",
+    "@tauri-apps/plugin-process": "^2.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "typescript": "~5.7.2",
+    "vite": "^6.3.2",
+    "vue-tsc": "^2.2.8",
+    "tailwindcss": "^4.1.4",
+    "@tailwindcss/vite": "^4.1.4"
+  }
+}

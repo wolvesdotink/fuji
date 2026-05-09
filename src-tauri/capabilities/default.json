@@ -1,0 +1,31 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "shell:allow-execute",
+    "shell:allow-spawn",
+    "dialog:allow-ask",
+    "dialog:allow-confirm",
+    "dialog:default",
+    {
+      "identifier": "fs:allow-read",
+      "allow": [
+        { "path": "/Volumes/**" },
+        { "path": "$HOME/.cache/fuji-culler/**" }
+      ]
+    },
+    {
+      "identifier": "fs:allow-exists",
+      "allow": [
+        { "path": "/Volumes/**" },
+        { "path": "$HOME/.cache/fuji-culler/**" }
+      ]
+    }
+  ]
+}

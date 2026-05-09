@@ -1,0 +1,222 @@
+# =============================================================================
+# release.yml — build and publish a signed, notarized macOS .dmg + updater
+#               manifest to a GitHub Release.
+# =============================================================================
+#
+# TRIGGERS
+#   - push to a tag matching `v*.*.*` (e.g. v0.1.1)        → publish release
+#   - workflow_dispatch (manual run from the Actions tab)  → publish draft
+#
+# WHAT IT BUILDS (Apple Silicon only — see plan; universal can come later
+# once a matching x86_64-apple-darwin ptp-bridge binary exists)
+#   - fuji-culler_<version>_aarch64.dmg            (signed + notarized)
+#   - fuji-culler.app.tar.gz + .sig                (updater payload + sig)
+#   - latest.json                                  (updater manifest consumed
+#                                                   by the in-app updater)
+#
+# DESIGN NOTE: split build from publish
+#   `tauri-action` builds, signs, and notarizes — but we do NOT let it publish.
+#   Instead, the publish step uses `softprops/action-gh-release` which creates
+#   the GitHub Release with all assets in one atomic API call. This is
+#   compatible with GitHub's Immutable Releases feature, where a release is
+#   frozen the moment it's created and assets cannot be added afterward.
+#
+# DISTRIBUTION URLS (set up by GitHub automatically)
+#   - direct dmg : https://github.com/wolvesdotink/fuji/releases/download/v<version>/fuji-culler_<version>_aarch64.dmg
+#   - latest dmg : https://github.com/wolvesdotink/fuji/releases/latest/download/fuji.dmg
+#                  (we publish an aliased copy named exactly fuji.dmg so the
+#                   marketing site can hard-code one URL forever)
+#   - manifest   : https://github.com/wolvesdotink/fuji/releases/latest/download/latest.json
+#
+# REQUIRED REPO SECRETS  (Settings → Secrets and variables → Actions)
+#   Apple code-signing + notarization:
+#     APPLE_CERTIFICATE              base64 of your Developer ID .p12
+#     APPLE_CERTIFICATE_PASSWORD     password for that .p12
+#     APPLE_SIGNING_IDENTITY         "Developer ID Application: <Name> (TEAMID)"
+#     APPLE_ID                       your Apple ID email
+#     APPLE_PASSWORD                 app-specific password (appleid.apple.com → Sign-In and Security → App-Specific Passwords)
+#     APPLE_TEAM_ID                  10-character team id
+#
+#   Tauri updater signing (separate from Apple, signs the .tar.gz):
+#     TAURI_SIGNING_PRIVATE_KEY            contents of .secrets/updater.key
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD   blank if generated without password
+#
+#   GITHUB_TOKEN is provided automatically; no setup needed.
+# =============================================================================
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same ref so a quick re-tag doesn't queue duplicates.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Only publishing-the-release needs `contents: write`. Everything else stays read.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish (macOS aarch64)
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm 10
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Apple Silicon only — matches the single-arch ptp-bridge external binary
+      # currently committed at src-tauri/binaries/ptp-bridge-aarch64-apple-darwin.
+      # Move to universal-apple-darwin once an x86_64 ptp-bridge is available.
+      - name: Setup Rust (aarch64-apple-darwin)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Make sure the external binary is executable on the runner. Some git
+      # checkouts strip the executable bit on extended-attribute files; if the
+      # bit is missing, Tauri's bundle step rejects the binary at sign time.
+      - name: Ensure ptp-bridge is executable
+        run: chmod +x src-tauri/binaries/ptp-bridge-aarch64-apple-darwin
+
+      # tauri-action without `tagName` does NOT create a GitHub Release — it
+      # just runs the build/sign/notarize/updater-sign pipeline. We publish
+      # ourselves below so the release is born complete (Immutable-safe).
+      - name: Build, sign, notarize
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Apple code-signing (.app + .dmg)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Apple notarization (legacy Apple-ID method; switch to API key
+          # secrets if you'd rather use App Store Connect API keys).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Tauri updater payload signing (separate from Apple).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          args: --target aarch64-apple-darwin
+
+      # Stage every release asset under dist/ so the publish step has one
+      # place to look. Renames the artifacts to drop the space in
+      # "Fuji Culler" — clean URL-safe filenames for the published release.
+      # Also generates latest.json (the updater manifest) since we are no
+      # longer using tauri-action's publish flow.
+      - name: Stage release assets
+        id: stage
+        run: |
+          set -euo pipefail
+          BUNDLE=src-tauri/target/aarch64-apple-darwin/release/bundle
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          REPO="${{ github.repository }}"
+
+          mkdir -p dist
+
+          # Versioned dmg (kept for archive/audit purposes), renamed to drop
+          # the space in "Fuji Culler".
+          cp "$BUNDLE/dmg/Fuji Culler_${VERSION}_aarch64.dmg" "dist/fuji-culler_${VERSION}_aarch64.dmg"
+
+          # Stable-named dmg — the marketing site uses this URL forever.
+          cp "$BUNDLE/dmg/Fuji Culler_${VERSION}_aarch64.dmg" "dist/fuji.dmg"
+
+          # Updater payload + minisign signature, renamed to drop the space
+          # so the URLs in latest.json are clean.
+          cp "$BUNDLE/macos/Fuji Culler.app.tar.gz"     "dist/fuji-culler.app.tar.gz"
+          cp "$BUNDLE/macos/Fuji Culler.app.tar.gz.sig" "dist/fuji-culler.app.tar.gz.sig"
+
+          # Updater manifest. We point at the version-specific download URL
+          # (not /latest/) so a client mid-update gets exactly the version
+          # the manifest advertised, even if a newer release lands meanwhile.
+          # Apple Silicon only — drop darwin-x86_64 from the manifest until
+          # we ship a universal or matrix build.
+          SIG=$(cat "$BUNDLE/macos/Fuji Culler.app.tar.gz.sig")
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          UPDATER_URL="https://github.com/${REPO}/releases/download/v${VERSION}/fuji-culler.app.tar.gz"
+
+          cat > dist/latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "notes": "See the release page for details.",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "darwin-aarch64": { "signature": "${SIG}", "url": "${UPDATER_URL}" }
+            }
+          }
+          EOF
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      # One atomic API call: create the release with every asset in place.
+      # Works correctly under GitHub's Immutable Releases (the release is
+      # frozen at creation time, but it's already complete when frozen).
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.stage.outputs.version }}
+          name: Fuji Culler v${{ steps.stage.outputs.version }}
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          prerelease: false
+          fail_on_unmatched_files: true
+          body: |
+            Download `fuji.dmg` below.
+
+            **First launch on a clean Mac:** the app is signed and notarized,
+            so it should open without warnings. If macOS still complains
+            (e.g. because the file was downloaded via a non-browser tool),
+            right-click the app → Open → Open.
+
+            **Apple Silicon only.** Intel Macs are not currently supported.
+
+            Existing users: the in-app updater will offer this version on
+            the next launch.
+          files: |
+            dist/fuji-culler_${{ steps.stage.outputs.version }}_aarch64.dmg
+            dist/fuji.dmg
+            dist/fuji-culler.app.tar.gz
+            dist/fuji-culler.app.tar.gz.sig
+            dist/latest.json

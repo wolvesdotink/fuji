@@ -1,0 +1,61 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Warm charcoal background, matches App.vue radial-gradient -->
+    <radialGradient id="bgGrad" cx="50%" cy="40%" r="75%">
+      <stop offset="0%" stop-color="#1a1816"/>
+      <stop offset="100%" stop-color="#0a0908"/>
+    </radialGradient>
+
+    <!-- Warm Fuji-gold gradient for the blades -->
+    <linearGradient id="goldGrad" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#e6c674"/>
+      <stop offset="55%" stop-color="#c4a24e"/>
+      <stop offset="100%" stop-color="#9d7e34"/>
+    </linearGradient>
+
+    <!-- Soft halo glow behind the iris -->
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#c4a24e" stop-opacity="0.22"/>
+      <stop offset="55%" stop-color="#c4a24e" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#c4a24e" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- macOS-style rounded square mask (~22.37% of side) -->
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="229" ry="229"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <!-- Background -->
+    <rect width="1024" height="1024" fill="url(#bgGrad)"/>
+
+    <!-- Halo behind the star -->
+    <circle cx="512" cy="512" r="430" fill="url(#halo)"/>
+
+    <!-- Outer aperture ring (echoes ImportProgress .ring-outer) -->
+    <circle cx="512" cy="512" r="380" fill="none" stroke="#2a2725" stroke-width="3"/>
+
+    <!-- Inner aperture ring (echoes .ring-inner) -->
+    <circle cx="512" cy="512" r="282" fill="none" stroke="#221f1d" stroke-width="2"/>
+
+    <!-- Six iris blades — same silhouette as ImportProgress.vue, scaled to fill -->
+    <!-- Original blade: M24 10 L27.5 17 L24 19 L20.5 17 (in 48x48 viewBox, centered at 24,24) -->
+    <!-- Scale 21.333x → vertices: (0,-298.7) (74.7,-149.3) (0,-106.7) (-74.7,-149.3) -->
+    <g transform="translate(512 512)"
+       fill="url(#goldGrad)"
+       stroke="#7a6128"
+       stroke-width="1.5"
+       stroke-linejoin="round">
+      <path transform="rotate(0)"   d="M0 -298.7 L74.7 -149.3 L0 -106.7 L-74.7 -149.3 Z"/>
+      <path transform="rotate(60)"  d="M0 -298.7 L74.7 -149.3 L0 -106.7 L-74.7 -149.3 Z"/>
+      <path transform="rotate(120)" d="M0 -298.7 L74.7 -149.3 L0 -106.7 L-74.7 -149.3 Z"/>
+      <path transform="rotate(180)" d="M0 -298.7 L74.7 -149.3 L0 -106.7 L-74.7 -149.3 Z"/>
+      <path transform="rotate(240)" d="M0 -298.7 L74.7 -149.3 L0 -106.7 L-74.7 -149.3 Z"/>
+      <path transform="rotate(300)" d="M0 -298.7 L74.7 -149.3 L0 -106.7 L-74.7 -149.3 Z"/>
+    </g>
+
+    <!-- Tiny center pinprick for aperture/lens feel -->
+    <circle cx="512" cy="512" r="6" fill="#e6c674" opacity="0.9"/>
+  </g>
+</svg>

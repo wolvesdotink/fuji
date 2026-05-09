@@ -1,0 +1,345 @@
+import { defineStore } from "pinia";
+import { ref, computed } from "vue";
+import { homeDir, join } from "@tauri-apps/api/path";
+import type { LibraryImage, SearchResult } from "@/types";
+import {
+  listLibraryImages,
+  generateLibraryThumbnails,
+  ensureClipModels,
+  indexLibrary,
+  searchLibrary,
+  readFileRatings,
+  writeFileRating,
+} from "@/lib/commands";
+
+export const useLibraryStore = defineStore("library", () => {
+  // Images
+  const images = ref<LibraryImage[]>([]);
+  const thumbnailPaths = ref<Map<string, string>>(new Map());
+  const isLoading = ref(false);
+  const isLoadingThumbnails = ref(false);
+  const thumbnailProgress = ref({ completed: 0, total: 0 });
+
+  // Navigation
+  const currentIndex = ref(0);
+  const viewMode = ref<"grid" | "single">("grid");
+  const sortBy = ref<"created" | "updated" | "stars">("created");
+
+  // Ratings
+  const ratings = ref<Map<string, number>>(new Map()); // file_path → 1-5
+  let writeTimeout: ReturnType<typeof setTimeout> | null = null;
+  const pendingWrites = new Map<string, number>();
+
+  // Search
+  const searchQuery = ref("");
+  const searchResults = ref<SearchResult[] | null>(null);
+  const isSearching = ref(false);
+  const isIndexing = ref(false);
+  const indexProgress = ref({ completed: 0, total: 0 });
+  const isIndexReady = ref(false);
+
+  // Model download
+  const isDownloadingModel = ref(false);
+  const modelDownloadProgress = ref({ bytes_downloaded: 0, bytes_total: 0, file_name: "" });
+
+  // Computed
+  const displayImages = computed(() => {
+    if (searchResults.value) {
+      const resultIds = new Map(
+        searchResults.value.map((r) => [r.image_id, r.score])
+      );
+      return images.value
+        .filter((img) => resultIds.has(img.id))
+        .sort((a, b) => {
+          const scoreA = resultIds.get(a.id) ?? 0;
+          const scoreB = resultIds.get(b.id) ?? 0;
+          return scoreB - scoreA;
+        });
+    }
+
+    const sort = sortBy.value;
+    const sorted = [...images.value];
+
+    switch (sort) {
+      case "updated":
+        sorted.sort((a, b) => b.date_modified - a.date_modified);
+        break;
+      case "stars": {
+        const r = ratings.value;
+        sorted.sort((a, b) => {
+          const rA = r.get(a.file_path) ?? 0;
+          const rB = r.get(b.file_path) ?? 0;
+          if (rA !== rB) return rB - rA;
+          return b.date_created - a.date_created;
+        });
+        break;
+      }
+      case "created":
+      default:
+        sorted.sort((a, b) => b.date_created - a.date_created);
+        break;
+    }
+
+    return sorted;
+  });
+
+  const currentImage = computed(
+    () => displayImages.value[currentIndex.value] ?? null
+  );
+
+  const searchScores = computed(() => {
+    if (!searchResults.value) return new Map<string, number>();
+    return new Map(searchResults.value.map((r) => [r.image_id, r.score]));
+  });
+
+  // Rating helpers
+  function getRating(filePath: string): number {
+    return ratings.value.get(filePath) ?? 0;
+  }
+
+  function setRating(filePath: string, rating: number) {
+    // Mutate the Map directly — Vue 3 wraps Map collections reactively, so
+    // per-key observers invalidate, but we avoid triggering every computed
+    // that touches `ratings.value` (which a full Map reassignment would do).
+    if (rating === 0) {
+      ratings.value.delete(filePath);
+    } else {
+      ratings.value.set(filePath, rating);
+    }
+
+    // Debounced write to file
+    pendingWrites.set(filePath, rating);
+    if (writeTimeout) clearTimeout(writeTimeout);
+    writeTimeout = setTimeout(() => flushPendingWrites(), 500);
+  }
+
+  async function flushPendingWrites() {
+    const writes = new Map(pendingWrites);
+    pendingWrites.clear();
+
+    for (const [filePath, rating] of writes) {
+      try {
+        await writeFileRating(filePath, rating);
+      } catch (e) {
+        console.error(`Failed to write rating for ${filePath}:`, e);
+      }
+    }
+  }
+
+  // Actions
+  async function loadLibrary(destPath: string) {
+    if (!destPath) return;
+    isLoading.value = true;
+    try {
+      const home = await homeDir();
+      const indexCacheDir = await join(home, ".cache", "fuji-culler");
+      images.value = await listLibraryImages(destPath, indexCacheDir);
+      thumbnailPaths.value = new Map();
+      currentIndex.value = 0;
+      searchResults.value = null;
+      searchQuery.value = "";
+      ratings.value = new Map();
+
+      if (images.value.length > 0) {
+        await loadThumbnails();
+
+        // Read ratings from file XMP metadata
+        try {
+          const filePaths = images.value.map((img) => img.file_path);
+          const fileRatings = await readFileRatings(filePaths);
+          for (const [stem, rating] of Object.entries(fileRatings)) {
+            // Find the image with this stem to get its file_path
+            const img = images.value.find((i) => i.id === stem);
+            if (img) {
+              ratings.value.set(img.file_path, rating);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to read library ratings:", e);
+        }
+
+        // Trigger background CLIP indexing after thumbnails are ready
+        buildSearchIndex().catch((e) =>
+          console.error("Background indexing failed:", e)
+        );
+      }
+    } catch (e) {
+      console.error("Failed to load library:", e);
+    } finally {
+      isLoading.value = false;
+    }
+  }
+
+  async function loadThumbnails() {
+    if (images.value.length === 0) return;
+
+    isLoadingThumbnails.value = true;
+    thumbnailProgress.value = { completed: 0, total: images.value.length };
+
+    const home = await homeDir();
+    const cacheDir = await join(home, ".cache", "fuji-culler", "library-thumbs");
+
+    try {
+      await generateLibraryThumbnails(
+        images.value.map((img) => img.file_path),
+        images.value.map((img) => img.id),
+        cacheDir,
+        (progress) => {
+          thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+          // Trigger reactivity
+          thumbnailPaths.value = new Map(thumbnailPaths.value);
+          thumbnailProgress.value = {
+            completed: progress.completed,
+            total: progress.total,
+          };
+        }
+      );
+    } catch (e) {
+      console.error("Failed to generate library thumbnails:", e);
+    } finally {
+      isLoadingThumbnails.value = false;
+    }
+  }
+
+  function navigateNext() {
+    if (currentIndex.value < displayImages.value.length - 1) {
+      currentIndex.value++;
+    }
+  }
+
+  function navigatePrev() {
+    if (currentIndex.value > 0) {
+      currentIndex.value--;
+    }
+  }
+
+  async function buildSearchIndex() {
+    if (images.value.length === 0) return;
+
+    const home = await homeDir();
+    const modelDir = await join(home, ".cache", "fuji-culler", "models");
+    const indexPath = await join(home, ".cache", "fuji-culler", "clip-index.bin");
+
+    // Ensure models are downloaded
+    isDownloadingModel.value = true;
+    try {
+      await ensureClipModels(modelDir, (progress) => {
+        modelDownloadProgress.value = progress;
+      });
+    } catch (e) {
+      console.error("Failed to download CLIP models:", e);
+      isDownloadingModel.value = false;
+      return;
+    }
+    isDownloadingModel.value = false;
+
+    // Build index from thumbnails
+    isIndexing.value = true;
+    indexProgress.value = { completed: 0, total: images.value.length };
+
+    try {
+      const thumbPaths = images.value.map(
+        (img) => thumbnailPaths.value.get(img.id) ?? ""
+      );
+
+      await indexLibrary(
+        images.value.map((img) => img.id),
+        thumbPaths,
+        modelDir,
+        indexPath,
+        (progress) => {
+          indexProgress.value = {
+            completed: progress.completed,
+            total: progress.total,
+          };
+        }
+      );
+      isIndexReady.value = true;
+    } catch (e) {
+      console.error("Failed to build search index:", e);
+    } finally {
+      isIndexing.value = false;
+    }
+  }
+
+  async function searchImages(query: string) {
+    if (!query.trim()) {
+      clearSearch();
+      return;
+    }
+
+    searchQuery.value = query;
+    isSearching.value = true;
+
+    try {
+      const home = await homeDir();
+      const modelDir = await join(home, ".cache", "fuji-culler", "models");
+      const indexPath = await join(
+        home,
+        ".cache",
+        "fuji-culler",
+        "clip-index.bin"
+      );
+
+      searchResults.value = await searchLibrary(query, modelDir, indexPath);
+      currentIndex.value = 0;
+    } catch (e) {
+      console.error("Search failed:", e);
+      searchResults.value = [];
+    } finally {
+      isSearching.value = false;
+    }
+  }
+
+  function clearSearch() {
+    searchQuery.value = "";
+    searchResults.value = null;
+    currentIndex.value = 0;
+  }
+
+  // Flush pending writes before page unload
+  if (typeof window !== "undefined") {
+    window.addEventListener("beforeunload", () => {
+      if (pendingWrites.size > 0) {
+        flushPendingWrites();
+      }
+    });
+  }
+
+  return {
+    // State
+    images,
+    thumbnailPaths,
+    isLoading,
+    isLoadingThumbnails,
+    thumbnailProgress,
+    currentIndex,
+    viewMode,
+    sortBy,
+    ratings,
+    searchQuery,
+    searchResults,
+    searchScores,
+    isSearching,
+    isIndexing,
+    indexProgress,
+    isIndexReady,
+    isDownloadingModel,
+    modelDownloadProgress,
+
+    // Computed
+    displayImages,
+    currentImage,
+
+    // Actions
+    loadLibrary,
+    loadThumbnails,
+    navigateNext,
+    navigatePrev,
+    getRating,
+    setRating,
+    buildSearchIndex,
+    searchImages,
+    clearSearch,
+  };
+});

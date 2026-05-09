@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Fuji Culler",
+  "identifier": "ink.wolves.fuji",
+  "version": "0.1.0",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com",
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": ["/Volumes/**", "$HOME/**", "$TEMP/**"],
+          "requireLiteralLeadingDot": false
+        }
+      }
+    },
+    "windows": [
+      {
+        "title": "Fuji Culler",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "Photography",
+    "shortDescription": "Local-first photo culling for Fuji cameras.",
+    "longDescription": "Fuji Culler is a desktop app for fast, focused photo culling — direct PTP import, AI-assisted library search.",
+    "copyright": "Copyright (c) 2026 Wolves. All rights reserved.",
+    "publisher": "Wolves",
+    "homepage": "https://wolves.ink",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "externalBin": ["binaries/ptp-bridge"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "REPLACE_WITH_BASE64_PUBKEY_FROM_secrets/updater.key.pub",
+      "endpoints": [
+        "https://github.com/wolvesdotink/fuji/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
