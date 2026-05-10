@@ -131,6 +131,17 @@ pnpm bump:patch
 
 Requires [Rust](https://rustup.rs) and the [Tauri CLI prerequisites](https://tauri.app/start/prerequisites/).
 
+### DMG installer background
+
+The DMG window background is rendered from `src-tauri/assets/dmg-background.svg` (the source of truth) into `src-tauri/assets/dmg-background.png`, which Tauri reads at bundle time. The PNG is checked in so CI doesn't need any image tooling — only edit the SVG and regenerate when changing the design:
+
+```bash
+brew install librsvg          # one-time, only if you don't have rsvg-convert
+./scripts/build-dmg-background.sh
+```
+
+Window size and icon positions live alongside the background path in `src-tauri/tauri.conf.json` under `bundle.macOS.dmg`.
+
 ---
 
 ## License
