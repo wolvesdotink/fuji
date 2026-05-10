@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" alt="Fuji Culler" width="128" />
+</p>
+
 # Fuji Culler
 
 A fast, focused desktop app for culling and importing photos from Fuji cameras. Connect your camera, rate your keepers, and import — all without leaving the app.
