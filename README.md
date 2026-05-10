@@ -7,6 +7,16 @@ A fast, focused desktop app for culling and importing photos from Fuji cameras. 
 
 ---
 
+## Install
+
+Download the latest `fuji.dmg` from [GitHub Releases](https://github.com/wolvesdotink/fuji/releases/latest), open it, and drag Fuji Culler to Applications.
+
+The app is signed and notarized, so macOS will open it without warnings on first launch. Existing installs receive new versions automatically via the in-app updater.
+
+**Apple Silicon only.** Intel Macs are not currently supported.
+
+---
+
 ## Features
 
 ### Camera Import Workflow
@@ -99,7 +109,7 @@ The semantic search feature uses a quantized CLIP model downloaded on first use 
 ### System Requirements
 
 - macOS 11 (Big Sur) or later
-- Apple Silicon or Intel Mac
+- Apple Silicon Mac
 
 ---
 
