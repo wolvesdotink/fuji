@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Fuji Culler",
   "identifier": "ink.wolves.fuji",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -15,7 +15,11 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["/Volumes/**", "$HOME/**", "$TEMP/**"],
+          "allow": [
+            "/Volumes/**",
+            "$HOME/**",
+            "$TEMP/**"
+          ],
           "requireLiteralLeadingDot": false
         }
       }
@@ -33,7 +37,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "category": "Photography",
     "shortDescription": "Local-first photo culling for Fuji cameras.",
     "longDescription": "Fuji Culler is a desktop app for fast, focused photo culling — direct PTP import, AI-assisted library search.",
@@ -50,7 +57,9 @@
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
-    "externalBin": ["binaries/ptp-bridge"],
+    "externalBin": [
+      "binaries/ptp-bridge"
+    ],
     "createUpdaterArtifacts": true
   },
   "plugins": {
