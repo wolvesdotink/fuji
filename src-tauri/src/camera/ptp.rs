@@ -62,6 +62,16 @@ pub struct PtpDownloadedFile {
     pub path: String,
 }
 
+/// A live progress update emitted by the daemon during a download, one per file
+/// as it finishes. `completed` is the number of files downloaded so far.
+#[derive(Debug, Deserialize)]
+pub struct PtpDownloadProgress {
+    pub completed: u32,
+    #[allow(dead_code)]
+    pub total: u32,
+    pub name: String,
+}
+
 /// Result of a PTP delete command.
 #[derive(Debug, Deserialize)]
 pub struct PtpDeleteResult {
@@ -124,6 +134,11 @@ pub struct PtpBridge {
     state: Arc<Mutex<BridgeState>>,
 }
 
+/// Callback invoked for each non-terminal `progress` line of an in-flight
+/// request. Runs on the reader thread with the bridge lock released, so it must
+/// be `Send + Sync` and must not re-enter the bridge.
+type ProgressHandler = Arc<dyn Fn(Value) + Send + Sync>;
+
 struct BridgeState {
     /// Handle to the running daemon. `None` when not spawned or after exit.
     handle: Option<DaemonHandle>,
@@ -131,6 +146,10 @@ struct BridgeState {
     next_id: u64,
     /// Pending requests awaiting a response, keyed by id.
     pending: HashMap<u64, mpsc::Sender<Value>>,
+    /// Optional progress handlers for in-flight requests, keyed by id. An entry
+    /// lives for the duration of the request and is removed on completion,
+    /// timeout, or daemon exit alongside the matching `pending` entry.
+    progress_handlers: HashMap<u64, ProgressHandler>,
 }
 
 struct DaemonHandle {
@@ -145,12 +164,25 @@ impl PtpBridge {
                 handle: None,
                 next_id: 1,
                 pending: HashMap::new(),
+                progress_handlers: HashMap::new(),
             })),
         }
     }
 
     /// Send a command to the daemon and await its response.
     fn request(&self, cmd: &str, args: Value, timeout: Duration) -> Result<Value, String> {
+        self.request_with_progress(cmd, args, timeout, None)
+    }
+
+    /// Like `request`, but also routes any non-terminal `progress` lines for
+    /// this request to `progress` until the terminal response arrives.
+    fn request_with_progress(
+        &self,
+        cmd: &str,
+        args: Value,
+        timeout: Duration,
+        progress: Option<ProgressHandler>,
+    ) -> Result<Value, String> {
         // Make sure we have a live daemon. May spawn a new one if we don't.
         self.ensure_daemon()?;
 
@@ -189,9 +221,13 @@ impl PtpBridge {
             let line = serde_json::to_string(&Value::Object(req))
                 .map_err(|e| format!("failed to serialize request: {}", e))?;
 
-            // Register the pending responder BEFORE writing, so the reader
-            // thread never delivers a response for an id nobody's waiting on.
+            // Register the pending responder (and any progress handler) BEFORE
+            // writing, so the reader thread never delivers a response/progress
+            // for an id nobody's waiting on.
             state.pending.insert(id, tx);
+            if let Some(handler) = progress.clone() {
+                state.progress_handlers.insert(id, handler);
+            }
 
             // Finally, acquire the handle and perform the stdin write. Nothing
             // else touches state after this point within the block, so the
@@ -199,10 +235,12 @@ impl PtpBridge {
             let handle = state.handle.as_mut().expect("handle presence checked above");
             if let Err(e) = writeln!(handle.stdin, "{}", line) {
                 state.pending.remove(&id);
+                state.progress_handlers.remove(&id);
                 return Err(format!("failed to write to ptp-bridge stdin: {}", e));
             }
             if let Err(e) = handle.stdin.flush() {
                 state.pending.remove(&id);
+                state.progress_handlers.remove(&id);
                 return Err(format!("failed to flush ptp-bridge stdin: {}", e));
             }
 
@@ -219,9 +257,10 @@ impl PtpBridge {
             Err(_) => {
                 // Either timed out or the sender was dropped (daemon died and
                 // the reader thread cleaned up pending). Remove any lingering
-                // pending entry and report.
+                // pending/progress entry and report.
                 if let Ok(mut state) = self.state.lock() {
                     state.pending.remove(&id);
+                    state.progress_handlers.remove(&id);
                 }
                 Err(format!(
                     "ptp-bridge request timed out after {}s (cmd={})",
@@ -324,8 +363,32 @@ impl PtpBridge {
                     }
                 };
                 let id = response.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                // Non-terminal progress line: route to the request's progress
+                // handler (if any) WITHOUT completing the request. These carry
+                // `"event": "progress"` and no `"ok"` field.
+                let is_progress = response.get("event").and_then(|v| v.as_str()) == Some("progress");
+                if is_progress {
+                    let handler = match reader_state.lock() {
+                        Ok(s) => s.progress_handlers.get(&id).cloned(),
+                        Err(e) => {
+                            log::error!("ptp-bridge: state lock poisoned in reader: {}", e);
+                            break;
+                        }
+                    };
+                    // Call outside the lock so the handler can't deadlock on the
+                    // bridge state.
+                    if let Some(handler) = handler {
+                        handler(response);
+                    }
+                    continue;
+                }
+
                 let tx = match reader_state.lock() {
-                    Ok(mut s) => s.pending.remove(&id),
+                    Ok(mut s) => {
+                        s.progress_handlers.remove(&id);
+                        s.pending.remove(&id)
+                    }
                     Err(e) => {
                         log::error!("ptp-bridge: state lock poisoned in reader: {}", e);
                         break;
@@ -349,6 +412,7 @@ impl PtpBridge {
                     // Reap the zombie.
                     let _ = handle.child.wait();
                 }
+                state.progress_handlers.clear();
                 let pending: Vec<_> = state.pending.drain().collect();
                 drop(state);
                 for (_, tx) in pending {
@@ -406,6 +470,39 @@ impl PtpBridge {
                 "files": file_names,
             }),
             Duration::from_secs(3600),
+        )?;
+        serde_json::from_value(result)
+            .map_err(|e| format!("Failed to parse download result: {}", e))
+    }
+
+    /// Like `download`, but invokes `on_progress` with a [`PtpDownloadProgress`]
+    /// each time the daemon reports a file finished downloading. The callback
+    /// runs on the bridge reader thread, so it must be `Send + Sync` and must
+    /// not call back into this bridge.
+    pub fn download_with_progress<F>(
+        &self,
+        camera_name: &str,
+        dest_dir: &str,
+        file_names: &[String],
+        on_progress: F,
+    ) -> Result<PtpDownloadResult, String>
+    where
+        F: Fn(PtpDownloadProgress) + Send + Sync + 'static,
+    {
+        let handler: ProgressHandler = Arc::new(move |line: Value| {
+            if let Ok(p) = serde_json::from_value::<PtpDownloadProgress>(line) {
+                on_progress(p);
+            }
+        });
+        let result = self.request_with_progress(
+            "download",
+            json!({
+                "camera": camera_name,
+                "dest_dir": dest_dir,
+                "files": file_names,
+            }),
+            Duration::from_secs(3600),
+            Some(handler),
         )?;
         serde_json::from_value(result)
             .map_err(|e| format!("Failed to parse download result: {}", e))

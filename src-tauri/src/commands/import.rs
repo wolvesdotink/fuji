@@ -287,8 +287,25 @@ fn ptp_import_files_blocking(
         phase: ImportPhase::CopyingToLaCie,
     });
 
-    // Download all files in one batch via ptp-bridge
-    let result = bridge.download(&camera_name, &dest_dir, &files_to_download)?;
+    // Download all files in one batch via ptp-bridge. The daemon streams a
+    // progress event as each file finishes, which we forward to the UI so the
+    // counter climbs in real time instead of jumping from 0 to full at the end.
+    let progress_channel = on_progress.clone();
+    let result = bridge.download_with_progress(
+        &camera_name,
+        &dest_dir,
+        &files_to_download,
+        move |p| {
+            let _ = progress_channel.send(ImportProgress {
+                current_file: p.name,
+                files_completed: p.completed,
+                files_total,
+                bytes_copied: 0,
+                bytes_total: 0,
+                phase: ImportPhase::CopyingToLaCie,
+            });
+        },
+    )?;
 
     if !result.errors.is_empty() {
         log::warn!("PTP download errors: {:?}", result.errors);

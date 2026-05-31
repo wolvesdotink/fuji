@@ -559,6 +559,30 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         FileHandle.standardOutput.write("\n".data(using: .utf8)!)
     }
 
+    /// Write a non-terminal `progress` NDJSON line for an in-flight request.
+    /// Unlike `writeDaemonResponse`, this carries no `ok`/`result` so the Rust
+    /// reader routes it to the request's progress handler without completing the
+    /// request. Same unbuffered write so the parent sees it immediately.
+    func writeDaemonProgress(id: Int, completed: Int, total: Int, name: String) {
+        let line: [String: Any] = [
+            "id": id,
+            "event": "progress",
+            "completed": completed,
+            "total": total,
+            "name": name
+        ]
+
+        let data: Data
+        if let serialized = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) {
+            data = serialized
+        } else {
+            return
+        }
+
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write("\n".data(using: .utf8)!)
+    }
+
     /// Start the long-lived daemon. Called from the `daemon` CLI subcommand.
     /// Blocks the main thread forever on the run loop.
     func runDaemon() {
@@ -754,14 +778,16 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         let destURL = URL(fileURLWithPath: destDir)
         try? FileManager.default.createDirectory(at: destURL, withIntermediateDirectories: true)
 
-        let mediaFiles = (camera.mediaFiles ?? []).compactMap { $0 as? ICCameraFile }
         let fileNameSet = Set(fileNames)
+        let mediaFiles = (camera.mediaFiles ?? []).compactMap { $0 as? ICCameraFile }
+        let filesToDownload = mediaFiles.filter { ($0.name).map(fileNameSet.contains) ?? false }
+        let totalToDownload = filesToDownload.count
 
         var downloaded: [[String: Any]] = []
         var errors: [String] = []
 
-        for file in mediaFiles {
-            guard let name = file.name, fileNameSet.contains(name) else { continue }
+        for file in filesToDownload {
+            guard let name = file.name else { continue }
 
             stderrLog("Daemon: Downloading \(name)...")
             if let resultURL = downloadFile(camera: camera, file: file, destDir: destURL) {
@@ -772,6 +798,15 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             } else {
                 errors.append("Failed to download \(name): \(downloadError?.localizedDescription ?? "unknown error")")
             }
+
+            // Emit live progress after each file settles (success or failure) so
+            // the import counter reflects the actual number imported so far.
+            writeDaemonProgress(
+                id: id,
+                completed: downloaded.count,
+                total: totalToDownload,
+                name: name
+            )
         }
 
         camera.requestCloseSession()
