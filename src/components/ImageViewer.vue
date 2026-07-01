@@ -57,9 +57,10 @@ const imageSrc = computed(() => {
   return ""; // PTP image still loading
 });
 
-// Progressive loading: show thumbnail instantly, crossfade to full-res.
-// Mirrors ImageCard.vue's fallback chain so the view-transition snapshot
-// always has content to stabilize — even in HIF-only / PTP paths.
+// Progressive loading: show a cached thumbnail instantly, crossfade to
+// full-res. When no thumbnail is cached we return "" rather than the
+// full-res HIF — decoding a multi-MB HIF just to use it as its own
+// placeholder stalls the swap it's meant to hide.
 const thumbnailSrc = computed(() => {
   if (!image.value) return "";
   const thumbPath = store.thumbnailPaths.get(image.value.id);
@@ -67,9 +68,8 @@ const thumbnailSrc = computed(() => {
   if (image.value.hif_path.startsWith("ptp://")) {
     const ptpCached = store.ptpPreviewCache.get(image.value.id);
     if (ptpCached) return fileUrl(ptpCached);
-    return "";
   }
-  return fileUrl(image.value.hif_path);
+  return "";
 });
 
 const fullResLoaded = ref(false);

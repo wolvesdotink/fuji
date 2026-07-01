@@ -17,14 +17,15 @@ const imageSrc = computed(() => {
   return fileUrl(image.value.file_path);
 });
 
-// Progressive loading: show thumbnail instantly, crossfade to full-res.
-// Fall back to the full file path when no thumbnail is cached so the
-// view-transition snapshot always has content to render.
+// Progressive loading: show a cached thumbnail instantly, crossfade to
+// full-res. When no thumbnail is cached we return "" rather than the full
+// file — decoding the full-res image just to use it as its own placeholder
+// stalls the swap it's meant to hide.
 const thumbnailSrc = computed(() => {
   if (!image.value) return "";
   const thumbPath = store.thumbnailPaths.get(image.value.id);
   if (thumbPath) return fileUrl(thumbPath);
-  return fileUrl(image.value.file_path);
+  return "";
 });
 
 const fullResLoaded = ref(false);
