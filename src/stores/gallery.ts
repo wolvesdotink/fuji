@@ -22,6 +22,7 @@ import {
   readFileRatings,
 } from "@/lib/commands";
 import { useAppStore } from "@/stores/app";
+import { deriveSelectionSummary } from "@/lib/selectionSummary";
 
 export const useGalleryStore = defineStore("gallery", () => {
   // Camera state
@@ -71,10 +72,6 @@ export const useGalleryStore = defineStore("gallery", () => {
   // Computed
   const currentImage = computed(() => images.value[currentIndex.value] ?? null);
 
-  const unreviewed = computed(() =>
-    images.value.filter((img) => !ratings.value.has(img.id))
-  );
-
   // Derive selection from rating
   function selectionFromRating(rating: number): SelectionChoice {
     if (rating === 0) return "Skip";
@@ -82,57 +79,20 @@ export const useGalleryStore = defineStore("gallery", () => {
     return "HeifAndRaw";
   }
 
-  const selectedForImport = computed(() =>
-    images.value.filter((img) => {
-      const rating = ratings.value.get(img.id);
-      return rating && rating > 0;
-    })
+  // One O(n) pass produces every selection stat (counts + import bytes).
+  // Previously `unreviewed`, `selectedForImport`, `selectionSummary` and
+  // `totalImportSize` each walked the whole gallery and re-ran on every
+  // rating change — four passes per keystroke over 1-5k images.
+  const selectionSummary = computed(() =>
+    deriveSelectionSummary(images.value, ratings.value)
   );
 
-  const selectionSummary = computed(() => {
-    let skip = 0;
-    let heifOnly = 0;
-    let heifAndRaw = 0;
-
-    for (const img of images.value) {
-      const rating = ratings.value.get(img.id);
-      if (!rating || rating === 0) {
-        skip++;
-      } else if (rating <= 3) {
-        heifOnly++;
-      } else {
-        heifAndRaw++;
-      }
-    }
-
-    return {
-      total: images.value.length,
-      skip,
-      heifOnly,
-      heifAndRaw,
-      reviewed: heifOnly + heifAndRaw + (images.value.length - unreviewed.value.length - heifOnly - heifAndRaw),
-      remaining: unreviewed.value.length,
-      toImport: heifOnly + heifAndRaw,
-    };
-  });
-
-  const totalImportSize = computed(() => {
-    let bytes = 0;
-    for (const img of images.value) {
-      const rating = ratings.value.get(img.id);
-      if (!rating || rating === 0) continue;
-      bytes += img.hif_size;
-      if (rating >= 4 && img.raf_size) {
-        bytes += img.raf_size;
-      }
-    }
-    return bytes;
-  });
+  const totalImportSize = computed(() => selectionSummary.value.bytes);
 
   const canImport = computed(
     () =>
       importDestination.value &&
-      selectedForImport.value.length > 0 &&
+      selectionSummary.value.toImport > 0 &&
       importState.value === "idle"
   );
 
@@ -597,8 +557,6 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     // Computed
     currentImage,
-    unreviewed,
-    selectedForImport,
     selectionSummary,
     totalImportSize,
     canImport,
