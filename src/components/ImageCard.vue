@@ -38,9 +38,21 @@ const thumbnailSrc = computed(() => {
     if (ptpCached) {
       return fileUrl(ptpCached);
     }
+    // PTP previews require a camera download; shimmer until one lands rather
+    // than falling through to the HIF fallback (a ptp:// path can't be loaded
+    // directly via the asset protocol).
+    return "";
   }
-  // No thumbnail yet — show the shimmer skeleton rather than decoding the
-  // full-res HIF as a stand-in (that stalls the grid on multi-MB decodes).
+  // A mass-storage image with a RAF sibling has a thumbnail in flight
+  // (loadThumbnails only processes images where raf_path is set), so show the
+  // shimmer skeleton rather than decoding the multi-MB HIF as a stand-in —
+  // that stalls the grid. But an image with no RAF sibling (HEIF-only or
+  // JPEG-only shoot) never gets a generated thumbnail, so fall back to the
+  // HEIF/JPEG itself; otherwise the card shimmers forever and never shows the
+  // photo. loading="lazy" + content-visibility keep this to on-screen decodes.
+  if (!props.image.raf_path) {
+    return fileUrl(props.image.hif_path);
+  }
   return "";
 });
 
