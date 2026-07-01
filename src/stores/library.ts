@@ -141,27 +141,29 @@ export const useLibraryStore = defineStore("library", () => {
       ratings.value = new Map();
 
       if (images.value.length > 0) {
-        await loadThumbnails();
-
-        // Read ratings from file XMP metadata
-        try {
-          const filePaths = images.value.map((img) => img.file_path);
-          const fileRatings = await readFileRatings(filePaths);
-          for (const [stem, rating] of Object.entries(fileRatings)) {
-            // Find the image with this stem to get its file_path
-            const img = images.value.find((i) => i.id === stem);
-            if (img) {
-              ratings.value.set(img.file_path, rating);
+        // Read ratings from file XMP metadata concurrently. This is
+        // independent of thumbnail generation, so kick it off now and apply
+        // the results as soon as they resolve — the grid can render ratings
+        // without waiting for thumbnails.
+        const filePaths = images.value.map((img) => img.file_path);
+        readFileRatings(filePaths)
+          .then((fileRatings) => {
+            for (const [stem, rating] of Object.entries(fileRatings)) {
+              // Find the image with this stem to get its file_path
+              const img = images.value.find((i) => i.id === stem);
+              if (img) {
+                ratings.value.set(img.file_path, rating);
+              }
             }
-          }
-        } catch (e) {
-          console.error("Failed to read library ratings:", e);
-        }
+          })
+          .catch((e) => console.error("Failed to read library ratings:", e));
 
-        // Trigger background CLIP indexing after thumbnails are ready
-        buildSearchIndex().catch((e) =>
-          console.error("Background indexing failed:", e)
-        );
+        // Generate thumbnails in the background, then build the CLIP index.
+        // buildSearchIndex reads thumbnailPaths, so it MUST run only after
+        // thumbnails complete — hence the chained .then().
+        loadThumbnails()
+          .then(() => buildSearchIndex())
+          .catch((e) => console.error("Background indexing failed:", e));
       }
     } catch (e) {
       console.error("Failed to load library:", e);
