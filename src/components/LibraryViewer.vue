@@ -131,6 +131,7 @@ function onRating(r: number) {
         :alt="image.id"
         :class="['full-image', { loaded: fullResLoaded }]"
         :key="'full-' + image.id"
+        decoding="async"
         @load="onFullResLoad"
       />
 
