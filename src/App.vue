@@ -39,25 +39,18 @@ let unlistenMount: UnlistenFn;
 let unlistenUnmount: UnlistenFn;
 
 onMounted(async () => {
-  // Load persisted config (destination path)
+  // Load persisted config (destination path) — this must complete first so
+  // the destination path is known before we sync it or load the library.
   await appStore.loadPersistedConfig();
-
-  // If we have a persisted destination, load the library
-  if (appStore.destinationPath) {
-    await libraryStore.loadLibrary(appStore.destinationPath);
-  }
 
   // Sync import destination from persisted config
   if (appStore.destinationPath && !galleryStore.importDestination) {
     galleryStore.importDestination = appStore.destinationPath;
   }
 
-  // Scan for already-connected cameras. Not awaited — the library should
-  // render immediately; if a camera is found, a non-blocking prompt appears
-  // over the library asking the user whether to import.
-  void galleryStore.scanCamera();
-
-  // Listen for camera mount/unmount events
+  // Register camera mount/unmount listeners BEFORE scanning/loading so a
+  // camera plugged in during startup is never missed while the (potentially
+  // slow) library load is in flight.
   unlistenMount = await listen<CameraVolume>("camera-mounted", (event) => {
     // setCameraFromEvent no longer triggers a catalog — it just records the
     // camera and requests the import prompt. The user consents via the modal
@@ -74,6 +67,19 @@ onMounted(async () => {
       appStore.switchToLibrary();
     }
   });
+
+  // Scan for already-connected cameras. Not awaited — the library should
+  // render immediately; if a camera is found, a non-blocking prompt appears
+  // over the library asking the user whether to import. scanCamera dedups
+  // against a later camera-mounted event via setCameraFromEvent's guards.
+  void galleryStore.scanCamera();
+
+  // If we have a persisted destination, load the library. Not awaited — it
+  // has its own try/catch and drives its own loading flags, so the app shell
+  // (and a detected camera) become interactive immediately.
+  if (appStore.destinationPath) {
+    void libraryStore.loadLibrary(appStore.destinationPath);
+  }
 });
 
 onUnmounted(() => {

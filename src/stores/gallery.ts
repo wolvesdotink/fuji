@@ -246,21 +246,20 @@ export const useGalleryStore = defineStore("gallery", () => {
       ratings.value = new Map();
       currentIndex.value = 0;
 
-      // Read camera-set ratings from HIF files (mass storage only)
+      // For mass-storage cameras, read camera-set ratings from HIF files and
+      // generate RAF thumbnails. Kick off the ratings read first so it runs
+      // concurrently with thumbnail generation and applies as soon as it
+      // resolves, instead of gating thumbnails behind it.
       if (!isPtp()) {
-        try {
-          const hifPaths = images.value.map((img) => img.hif_path);
-          const fileRatings = await readFileRatings(hifPaths);
-          for (const [stem, rating] of Object.entries(fileRatings)) {
-            ratings.value.set(stem, rating);
-          }
-        } catch (e) {
-          console.error("Failed to read camera ratings:", e);
-        }
-      }
+        const hifPaths = images.value.map((img) => img.hif_path);
+        readFileRatings(hifPaths)
+          .then((fileRatings) => {
+            for (const [stem, rating] of Object.entries(fileRatings)) {
+              ratings.value.set(stem, rating);
+            }
+          })
+          .catch((e) => console.error("Failed to read camera ratings:", e));
 
-      // For mass-storage cameras, generate thumbnails from RAF files
-      if (!isPtp()) {
         await loadThumbnails();
       }
       // For PTP cameras, thumbnails were already generated during catalog
