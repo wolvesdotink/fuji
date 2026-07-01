@@ -2,12 +2,15 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 use tauri::ipc::Channel;
+use tauri::State;
 use walkdir::WalkDir;
 
 use crate::clip;
+use crate::clip::engine::ClipEngine;
 use crate::commands::thumbnails::thumb_file_name;
 use crate::index;
 use crate::models::{
@@ -265,73 +268,14 @@ pub async fn index_library(
     model_dir: String,
     index_path: String,
     on_progress: Channel<IndexProgress>,
+    state: State<'_, Arc<ClipEngine>>,
 ) -> Result<(), String> {
+    let engine = state.inner().clone();
     tokio::task::spawn_blocking(move || {
-        index_library_blocking(image_ids, thumb_paths, model_dir, index_path, on_progress)
+        engine.index(image_ids, thumb_paths, model_dir, index_path, on_progress)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
-}
-
-fn index_library_blocking(
-    image_ids: Vec<String>,
-    thumb_paths: Vec<String>,
-    model_dir: String,
-    index_path: String,
-    on_progress: Channel<IndexProgress>,
-) -> Result<(), String> {
-    // Load existing index for incremental updates
-    let mut index = clip::index::SearchIndex::load(&index_path)?;
-    let already_indexed = index.indexed_ids();
-
-    // Filter to only new images
-    let new_items: Vec<(String, String)> = image_ids
-        .into_iter()
-        .zip(thumb_paths.into_iter())
-        .filter(|(id, path)| !already_indexed.contains_key(id) && !path.is_empty())
-        .collect();
-
-    if new_items.is_empty() {
-        let _ = on_progress.send(IndexProgress {
-            completed: 0,
-            total: 0,
-        });
-        return Ok(());
-    }
-
-    let total = new_items.len() as u32;
-
-    // Load the vision model
-    let vision_path = clip::model::vision_model_path(&model_dir);
-    let mut session = ort::session::Session::builder()
-        .map_err(|e| format!("Failed to create session builder: {}", e))?
-        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("Failed to set optimization level: {}", e))?
-        .commit_from_file(&vision_path)
-        .map_err(|e| format!("Failed to load vision model: {}", e))?;
-
-    // Process each image
-    for (i, (image_id, thumb_path)) in new_items.iter().enumerate() {
-        match clip::image::embed_image(&mut session, thumb_path) {
-            Ok(embedding) => {
-                index.add(image_id.clone(), embedding);
-            }
-            Err(e) => {
-                log::error!("Failed to embed image {}: {}", image_id, e);
-            }
-        }
-
-        let _ = on_progress.send(IndexProgress {
-            completed: (i + 1) as u32,
-            total,
-        });
-    }
-
-    // Save updated index
-    index.save(&index_path)?;
-
-    log::info!("Search index updated: {} total entries", index.entries.len());
-    Ok(())
 }
 
 /// Search the library using a text query.
@@ -341,49 +285,12 @@ pub async fn search_library(
     query: String,
     model_dir: String,
     index_path: String,
+    state: State<'_, Arc<ClipEngine>>,
 ) -> Result<Vec<SearchResult>, String> {
-    tokio::task::spawn_blocking(move || search_library_blocking(query, model_dir, index_path))
+    let engine = state.inner().clone();
+    tokio::task::spawn_blocking(move || engine.search(query, model_dir, index_path))
         .await
         .map_err(|e| format!("Task join error: {}", e))?
-}
-
-fn search_library_blocking(
-    query: String,
-    model_dir: String,
-    index_path: String,
-) -> Result<Vec<SearchResult>, String> {
-    log::info!("Searching for: \"{}\"", query);
-    let index = clip::index::SearchIndex::load(&index_path)?;
-    log::info!("Loaded index with {} entries", index.entries.len());
-    if index.entries.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Load text model and tokenizer
-    let text_path = clip::model::text_model_path(&model_dir);
-    let tok_path = clip::model::tokenizer_path(&model_dir);
-
-    let mut text_session = ort::session::Session::builder()
-        .map_err(|e| format!("Failed to create session builder: {}", e))?
-        .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-        .map_err(|e| format!("Failed to set optimization level: {}", e))?
-        .commit_from_file(&text_path)
-        .map_err(|e| format!("Failed to load text model: {}", e))?;
-
-    let tokenizer = tokenizers::Tokenizer::from_file(&tok_path)
-        .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
-
-    // Encode the query
-    let query_embedding = clip::text::embed_text(&mut text_session, &tokenizer, &query)?;
-
-    // Search the index (min score threshold to filter irrelevant results)
-    let results = index.search(&query_embedding, 0.15);
-    log::info!("Search returned {} results", results.len());
-
-    Ok(results
-        .into_iter()
-        .map(|(image_id, score)| SearchResult { image_id, score })
-        .collect())
 }
 
 #[cfg(test)]

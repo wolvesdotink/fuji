@@ -25,6 +25,11 @@ pub fn run() {
             let bridge = Arc::new(camera::ptp::PtpBridge::new());
             app.manage(bridge.clone());
 
+            // Persistent CLIP runtime: keeps the ONNX sessions, tokenizer, and
+            // search index resident so search/index no longer reload the model
+            // on every invocation. See clip/engine.rs.
+            app.manage(Arc::new(clip::engine::ClipEngine::default()));
+
             // Start the volume mount watcher (also polls the bridge for PTP)
             let handle = app.handle().clone();
             camera::detection::start_volume_watcher(handle, bridge);
