@@ -1,15 +1,14 @@
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::UNIX_EPOCH;
-use image::{DynamicImage, ImageDecoder, ImageReader};
 use rayon::prelude::*;
 use tauri::ipc::Channel;
 use walkdir::WalkDir;
 
 use crate::clip;
+use crate::commands::thumbnails::thumb_file_name;
 use crate::index;
 use crate::models::{
     IndexProgress, LibraryImage, ModelDownloadProgress, SearchResult, ThumbnailProgress,
@@ -133,8 +132,9 @@ fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
 }
 
 /// Generate thumbnails for library images.
-/// Two-step process: sips decodes HEIF→JPEG (temp), then Rust re-encodes to WebP.
-/// Falls back to existing .jpg thumbnails for backward compatibility.
+/// Single pass: sips decodes HEIF/HIF, resizes to 600px and writes the final
+/// lossy-JPEG `{id}.v3.jpg` thumbnail directly (no temp file, no re-encode).
+/// sips preserves the EXIF orientation tag, so portrait shots render upright.
 /// Uses rayon for parallel processing.
 #[tauri::command]
 pub async fn generate_library_thumbnails(
@@ -168,67 +168,38 @@ fn generate_library_thumbnails_blocking(
         .par_iter()
         .zip(image_paths.par_iter())
         .filter_map(|(image_id, image_path)| {
-            // `.v2.` suffix marks thumbnails generated with EXIF-orientation
-            // applied (see reencode_to_webp). Older un-suffixed files had
-            // portrait shots baked in sideways; they are ignored on disk.
-            let webp_path = cache.join(format!("{}.v2.webp", image_id));
-            let jpg_path = cache.join(format!("{}.v2.jpg", image_id));
+            // Both pipelines write `{id}.v3.jpg` (see thumb_file_name), so a
+            // single existence check decides hit vs. miss. `.v2.*` thumbnails
+            // from the old two-step WebP path are ignored and regenerated.
+            let thumb_path = cache.join(thumb_file_name(image_id));
 
-            // Check for existing thumbnails (webp first, then jpg backward compat)
-            let thumb_path = if webp_path.exists() {
-                webp_path
-            } else if jpg_path.exists() {
-                jpg_path
-            } else {
-                // Generate new WebP thumbnail via sips + image crate
-                let tmp_path = cache.join(format!("{}.tmp.jpg", image_id));
-
-                // Step 1: sips decodes HEIF/HIF to JPEG and resizes to 600px
+            if !thumb_path.exists() {
+                // One sips pass: decode HEIF/HIF, resize to 600px and write the
+                // final lossy JPEG (quality 80). sips preserves the EXIF
+                // orientation tag, so portrait shots stay upright in the webview.
                 let sips_result = Command::new("sips")
                     .args([
-                        "--resampleWidth",
+                        "-Z",
                         "600",
-                        "--setProperty",
+                        "-s",
                         "format",
                         "jpeg",
+                        "-s",
+                        "formatOptions",
+                        "80",
                         image_path,
                         "--out",
-                        &tmp_path.to_string_lossy(),
+                        &thumb_path.to_string_lossy(),
                     ])
                     .output();
 
                 match sips_result {
-                    Ok(result) if result.status.success() => {
-                        // Step 2: Re-encode temp JPEG to WebP
-                        match reencode_to_webp(&tmp_path, &webp_path) {
-                            Ok(()) => {
-                                // Clean up temp file
-                                let _ = fs::remove_file(&tmp_path);
-                                webp_path
-                            }
-                            Err(e) => {
-                                log::error!("Failed to re-encode to WebP for {}: {}", image_id, e);
-                                // Fall back to keeping the JPEG
-                                if tmp_path.exists() {
-                                    let _ = fs::rename(&tmp_path, &jpg_path);
-                                    jpg_path
-                                } else {
-                                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                                    let _ = on_progress.send(ThumbnailProgress {
-                                        image_id: image_id.clone(),
-                                        thumbnail_path: String::new(),
-                                        completed: done,
-                                        total,
-                                    });
-                                    return None;
-                                }
-                            }
-                        }
-                    }
+                    Ok(result) if result.status.success() => {}
                     Ok(result) => {
                         let stderr = String::from_utf8_lossy(&result.stderr);
                         log::error!("sips failed for {}: {}", image_id, stderr);
-                        let _ = fs::remove_file(&tmp_path);
+                        // Remove any partial output sips may have left behind.
+                        let _ = fs::remove_file(&thumb_path);
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         let _ = on_progress.send(ThumbnailProgress {
                             image_id: image_id.clone(),
@@ -250,7 +221,7 @@ fn generate_library_thumbnails_blocking(
                         return None;
                     }
                 }
-            };
+            }
 
             let thumb_str = thumb_path.to_string_lossy().to_string();
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -266,33 +237,6 @@ fn generate_library_thumbnails_blocking(
         .collect();
 
     Ok(results)
-}
-
-/// Re-encode a JPEG file to WebP, applying EXIF orientation to the pixels.
-///
-/// sips copies the EXIF orientation tag into the temp JPEG but does not
-/// physically rotate pixels. WebP encoding strips EXIF — so if we don't
-/// apply the orientation in-place here, portrait shots end up sideways in
-/// the cached thumbnail.
-fn reencode_to_webp(jpeg_path: &Path, webp_path: &Path) -> Result<(), String> {
-    let reader = ImageReader::open(jpeg_path)
-        .map_err(|e| format!("Failed to open JPEG: {}", e))?;
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|e| format!("Failed to build decoder: {}", e))?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut img = DynamicImage::from_decoder(decoder)
-        .map_err(|e| format!("Failed to decode JPEG: {}", e))?;
-    img.apply_orientation(orientation);
-
-    let mut output = Cursor::new(Vec::new());
-    img.write_to(&mut output, image::ImageFormat::WebP)
-        .map_err(|e| format!("Failed to encode WebP: {}", e))?;
-
-    fs::write(webp_path, output.into_inner())
-        .map_err(|e| format!("Failed to write WebP: {}", e))
 }
 
 // --- CLIP Search Commands ---
