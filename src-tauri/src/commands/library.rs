@@ -1,18 +1,18 @@
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::UNIX_EPOCH;
-use image::{DynamicImage, ImageDecoder, ImageReader};
 use rayon::prelude::*;
 use tauri::ipc::Channel;
 use walkdir::WalkDir;
 
 use crate::clip;
+use crate::commands::thumbnails::thumb_file_name;
 use crate::index;
 use crate::models::{
-    IndexProgress, LibraryImage, ModelDownloadProgress, SearchResult, ThumbnailProgress,
+    IndexFingerprint, IndexProgress, LibraryImage, ModelDownloadProgress, SearchResult,
+    ThumbnailProgress,
 };
 
 /// List images from a destination/library directory.
@@ -37,37 +37,39 @@ pub async fn list_library_images(
 
         let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
 
-        // Compute fingerprint for change detection
-        if let Ok(fingerprint) = index::compute_fingerprint(dir, extensions, None) {
-            // Try cached index
-            if let Some(cached) =
-                index::try_cached::<LibraryImage>(&index_path, &dir_path, &fingerprint)
-            {
-                log::info!("Using cached library index ({} images)", cached.len());
-                return Ok(cached);
+        // Fast path: only when a cached index already exists do we pay the cheap
+        // fingerprint walk to validate it. On a match we skip the full scan,
+        // keeping repeat loads (HIT) at a single directory walk.
+        if index_path.exists() {
+            if let Ok(fingerprint) = index::compute_fingerprint(dir, extensions, None) {
+                if let Some(cached) =
+                    index::try_cached::<LibraryImage>(&index_path, &dir_path, &fingerprint)
+                {
+                    log::info!("Using cached library index ({} images)", cached.len());
+                    return Ok(cached);
+                }
             }
-
-            // Cache miss: do full walk
-            let images = scan_library_images(dir)?;
-
-            // Save index for next time
-            if let Err(e) = index::cache_images(&index_path, &dir_path, &fingerprint, &images) {
-                log::warn!("Failed to save library index: {}", e);
-            }
-
-            Ok(images)
-        } else {
-            // Fingerprint failed, fall back to direct scan
-            scan_library_images(dir)
         }
+
+        // Miss / first run: a single walk yields both the images and the
+        // fingerprint we persist for next time.
+        let (images, fingerprint) = scan_library_images(dir)?;
+        if let Err(e) = index::cache_images(&index_path, &dir_path, &fingerprint, &images) {
+            log::warn!("Failed to save library index: {}", e);
+        }
+        Ok(images)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Full filesystem scan for library images.
-fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
+///
+/// Accumulates the index fingerprint during the same walk, so a cache miss
+/// costs one directory traversal instead of a separate fingerprint pass.
+fn scan_library_images(dir: &Path) -> Result<(Vec<LibraryImage>, IndexFingerprint), String> {
     let mut images: Vec<LibraryImage> = Vec::new();
+    let mut fingerprint = index::FingerprintAccumulator::default();
 
     for entry in WalkDir::new(dir)
         .min_depth(1)
@@ -103,6 +105,9 @@ fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
             .to_string();
 
         let metadata = entry.metadata().ok();
+        if let Some(m) = &metadata {
+            fingerprint.add(m);
+        }
         let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
         let date_created = metadata
             .as_ref()
@@ -129,12 +134,13 @@ fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
     // Sort by creation time descending (newest first)
     images.sort_by(|a, b| b.date_created.cmp(&a.date_created));
 
-    Ok(images)
+    Ok((images, fingerprint.finish()))
 }
 
 /// Generate thumbnails for library images.
-/// Two-step process: sips decodes HEIF→JPEG (temp), then Rust re-encodes to WebP.
-/// Falls back to existing .jpg thumbnails for backward compatibility.
+/// Single pass: sips decodes HEIF/HIF, resizes to 600px and writes the final
+/// lossy-JPEG `{id}.v3.jpg` thumbnail directly (no temp file, no re-encode).
+/// sips preserves the EXIF orientation tag, so portrait shots render upright.
 /// Uses rayon for parallel processing.
 #[tauri::command]
 pub async fn generate_library_thumbnails(
@@ -168,67 +174,38 @@ fn generate_library_thumbnails_blocking(
         .par_iter()
         .zip(image_paths.par_iter())
         .filter_map(|(image_id, image_path)| {
-            // `.v2.` suffix marks thumbnails generated with EXIF-orientation
-            // applied (see reencode_to_webp). Older un-suffixed files had
-            // portrait shots baked in sideways; they are ignored on disk.
-            let webp_path = cache.join(format!("{}.v2.webp", image_id));
-            let jpg_path = cache.join(format!("{}.v2.jpg", image_id));
+            // Both pipelines write `{id}.v3.jpg` (see thumb_file_name), so a
+            // single existence check decides hit vs. miss. `.v2.*` thumbnails
+            // from the old two-step WebP path are ignored and regenerated.
+            let thumb_path = cache.join(thumb_file_name(image_id));
 
-            // Check for existing thumbnails (webp first, then jpg backward compat)
-            let thumb_path = if webp_path.exists() {
-                webp_path
-            } else if jpg_path.exists() {
-                jpg_path
-            } else {
-                // Generate new WebP thumbnail via sips + image crate
-                let tmp_path = cache.join(format!("{}.tmp.jpg", image_id));
-
-                // Step 1: sips decodes HEIF/HIF to JPEG and resizes to 600px
+            if !thumb_path.exists() {
+                // One sips pass: decode HEIF/HIF, resize to 600px and write the
+                // final lossy JPEG (quality 80). sips preserves the EXIF
+                // orientation tag, so portrait shots stay upright in the webview.
                 let sips_result = Command::new("sips")
                     .args([
-                        "--resampleWidth",
+                        "-Z",
                         "600",
-                        "--setProperty",
+                        "-s",
                         "format",
                         "jpeg",
+                        "-s",
+                        "formatOptions",
+                        "80",
                         image_path,
                         "--out",
-                        &tmp_path.to_string_lossy(),
+                        &thumb_path.to_string_lossy(),
                     ])
                     .output();
 
                 match sips_result {
-                    Ok(result) if result.status.success() => {
-                        // Step 2: Re-encode temp JPEG to WebP
-                        match reencode_to_webp(&tmp_path, &webp_path) {
-                            Ok(()) => {
-                                // Clean up temp file
-                                let _ = fs::remove_file(&tmp_path);
-                                webp_path
-                            }
-                            Err(e) => {
-                                log::error!("Failed to re-encode to WebP for {}: {}", image_id, e);
-                                // Fall back to keeping the JPEG
-                                if tmp_path.exists() {
-                                    let _ = fs::rename(&tmp_path, &jpg_path);
-                                    jpg_path
-                                } else {
-                                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                                    let _ = on_progress.send(ThumbnailProgress {
-                                        image_id: image_id.clone(),
-                                        thumbnail_path: String::new(),
-                                        completed: done,
-                                        total,
-                                    });
-                                    return None;
-                                }
-                            }
-                        }
-                    }
+                    Ok(result) if result.status.success() => {}
                     Ok(result) => {
                         let stderr = String::from_utf8_lossy(&result.stderr);
                         log::error!("sips failed for {}: {}", image_id, stderr);
-                        let _ = fs::remove_file(&tmp_path);
+                        // Remove any partial output sips may have left behind.
+                        let _ = fs::remove_file(&thumb_path);
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         let _ = on_progress.send(ThumbnailProgress {
                             image_id: image_id.clone(),
@@ -250,7 +227,7 @@ fn generate_library_thumbnails_blocking(
                         return None;
                     }
                 }
-            };
+            }
 
             let thumb_str = thumb_path.to_string_lossy().to_string();
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -266,33 +243,6 @@ fn generate_library_thumbnails_blocking(
         .collect();
 
     Ok(results)
-}
-
-/// Re-encode a JPEG file to WebP, applying EXIF orientation to the pixels.
-///
-/// sips copies the EXIF orientation tag into the temp JPEG but does not
-/// physically rotate pixels. WebP encoding strips EXIF — so if we don't
-/// apply the orientation in-place here, portrait shots end up sideways in
-/// the cached thumbnail.
-fn reencode_to_webp(jpeg_path: &Path, webp_path: &Path) -> Result<(), String> {
-    let reader = ImageReader::open(jpeg_path)
-        .map_err(|e| format!("Failed to open JPEG: {}", e))?;
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|e| format!("Failed to build decoder: {}", e))?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut img = DynamicImage::from_decoder(decoder)
-        .map_err(|e| format!("Failed to decode JPEG: {}", e))?;
-    img.apply_orientation(orientation);
-
-    let mut output = Cursor::new(Vec::new());
-    img.write_to(&mut output, image::ImageFormat::WebP)
-        .map_err(|e| format!("Failed to encode WebP: {}", e))?;
-
-    fs::write(webp_path, output.into_inner())
-        .map_err(|e| format!("Failed to write WebP: {}", e))
 }
 
 // --- CLIP Search Commands ---
@@ -434,4 +384,51 @@ fn search_library_blocking(
         .into_iter()
         .map(|(image_id, score)| SearchResult { image_id, score })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fuji_{}_{}", tag, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) {
+        let mut f = fs::File::create(dir.join(name)).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    // The fingerprint folded into scan_library_images must be identical to the
+    // one compute_fingerprint produces on its own walk — otherwise a fresh scan
+    // would cache a fingerprint that never matches on the next load.
+    #[test]
+    fn scan_fingerprint_matches_compute_fingerprint() {
+        let dir = unique_temp_dir("libscan");
+        write_file(&dir, "a.HIF", b"aaaa"); // 4 bytes
+        write_file(&dir, "b.jpg", b"bbbbbbbb"); // 8, lowercase ext
+        write_file(&dir, "c.JPEG", b"cc"); // 2
+        write_file(&dir, "ignore.txt", b"nope"); // excluded extension
+        let sub = dir.join("sub"); // library walk is unbounded depth
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub, "d.heic", b"dddddd"); // 6, nested + lowercase
+
+        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
+        let expected = index::compute_fingerprint(&dir, extensions, None).unwrap();
+        let (images, folded) = scan_library_images(&dir).unwrap();
+
+        assert_eq!(folded, expected);
+        assert_eq!(folded.file_count, 4);
+        assert_eq!(folded.total_bytes, 20);
+        assert_eq!(images.len(), 4);
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
