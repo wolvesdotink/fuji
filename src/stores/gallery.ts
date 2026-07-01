@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, shallowRef } from "vue";
 import type {
   CameraVolume,
   ImagePair,
@@ -31,8 +31,10 @@ export const useGalleryStore = defineStore("gallery", () => {
   // but returned zero results; any other value is a hard error message.
   const detectionError = ref<string | null>(null);
 
-  // Images
-  const images = ref<ImagePair[]>([]);
+  // Images. Image records are immutable — the array is only ever replaced
+  // wholesale, never mutated in place — so shallowRef avoids deep-proxying
+  // every record (and re-tracking them on every dependency read).
+  const images = shallowRef<ImagePair[]>([]);
   const thumbnailPaths = ref<Map<string, string>>(new Map());
   const isLoadingThumbnails = ref(false);
   const thumbnailProgress = ref({ completed: 0, total: 0 });

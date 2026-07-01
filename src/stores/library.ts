@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, shallowRef } from "vue";
 import { homeDir, join } from "@tauri-apps/api/path";
 import type { LibraryImage, SearchResult } from "@/types";
 import {
@@ -13,8 +13,10 @@ import {
 } from "@/lib/commands";
 
 export const useLibraryStore = defineStore("library", () => {
-  // Images
-  const images = ref<LibraryImage[]>([]);
+  // Images. Image records are immutable — the array is only ever replaced
+  // wholesale, never mutated in place — so shallowRef avoids deep-proxying
+  // thousands of records (and re-tracking them on every dependency read).
+  const images = shallowRef<LibraryImage[]>([]);
   const thumbnailPaths = ref<Map<string, string>>(new Map());
   const isLoading = ref(false);
   const isLoadingThumbnails = ref(false);
