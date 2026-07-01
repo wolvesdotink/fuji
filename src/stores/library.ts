@@ -187,9 +187,12 @@ export const useLibraryStore = defineStore("library", () => {
         images.value.map((img) => img.id),
         cacheDir,
         (progress) => {
+          // In-place .set only — Vue wraps the Map reactively and tracks
+          // has/get per key, so only the card observing this image_id
+          // recomputes. Reassigning `new Map(...)` here invalidated every
+          // card's thumbnail lookup on each thumbnail, an O(n) storm per
+          // file → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
           thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
-          // Trigger reactivity
-          thumbnailPaths.value = new Map(thumbnailPaths.value);
           thumbnailProgress.value = {
             completed: progress.completed,
             total: progress.total,
