@@ -116,6 +116,10 @@ export const useGalleryStore = defineStore("gallery", () => {
 
   // PTP preview cache: maps image id → local file path
   const ptpPreviewCache = ref<Map<string, string>>(new Map());
+  // In-flight PTP downloads: image id → pending promise. Dedups concurrent
+  // requests for the same file (e.g. the viewer opening an image while the
+  // neighbor-prefetch is already downloading it) so we hit the camera once.
+  const ptpInFlight = new Map<string, Promise<string>>();
 
   // Actions
   async function scanCamera() {
@@ -490,13 +494,26 @@ export const useGalleryStore = defineStore("gallery", () => {
       return hifPath; // Not a PTP path, return as-is
     }
 
-    const home = await homeDir();
-    const cacheDir = await join(home, ".cache", "fuji-culler", "ptp-preview");
-    const fileName = ptpFileName(hifPath);
+    // Coalesce concurrent downloads of the same file onto one request.
+    const pending = ptpInFlight.get(imageId);
+    if (pending) return pending;
 
-    const localPath = await ptpDownloadFile(camera.value.mount_path, fileName, cacheDir);
-    ptpPreviewCache.value = new Map(ptpPreviewCache.value.set(imageId, localPath));
-    return localPath;
+    const cam = camera.value;
+    const download = (async () => {
+      const home = await homeDir();
+      const cacheDir = await join(home, ".cache", "fuji-culler", "ptp-preview");
+      const fileName = ptpFileName(hifPath);
+      const localPath = await ptpDownloadFile(cam.mount_path, fileName, cacheDir);
+      ptpPreviewCache.value = new Map(ptpPreviewCache.value.set(imageId, localPath));
+      return localPath;
+    })();
+
+    ptpInFlight.set(imageId, download);
+    try {
+      return await download;
+    } finally {
+      ptpInFlight.delete(imageId);
+    }
   }
 
   function setCameraFromEvent(vol: CameraVolume) {

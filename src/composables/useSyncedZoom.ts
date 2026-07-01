@@ -1,4 +1,4 @@
-import { ref, computed, type Ref, type ComputedRef } from "vue";
+import { ref, computed, onScopeDispose, type Ref, type ComputedRef } from "vue";
 
 /**
  * Shared zoom + pan state for N side-by-side panes.
@@ -65,6 +65,35 @@ export function useSyncedZoom(): SyncedZoom {
   const originX = ref(0.5);
   const originY = ref(0.5);
 
+  // Pending (uncommitted) zoom state. The wheel/drag handlers read AND
+  // write these plain values synchronously so that back-to-back events
+  // within a single frame compose correctly. Reading the reactive refs
+  // instead would see stale values (they only update once per frame after
+  // the rAF flush), making fast scroll-zoom drift or feel laggy. We commit
+  // pending → refs once per animation frame; the CSS transform therefore
+  // repaints at most once per frame no matter how many events fire.
+  let pendingScale = scale.value;
+  let pendingOriginX = originX.value;
+  let pendingOriginY = originY.value;
+  let rafId: number | null = null;
+
+  function scheduleCommit() {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      scale.value = pendingScale;
+      originX.value = pendingOriginX;
+      originY.value = pendingOriginY;
+    });
+  }
+
+  function cancelPendingCommit() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
   const transform = computed(() => `scale(${scale.value})`);
   const transformOrigin = computed(
     () => `${originX.value * 100}% ${originY.value * 100}%`
@@ -79,11 +108,13 @@ export function useSyncedZoom(): SyncedZoom {
     const u = (e.clientX - rect.left) / rect.width;
     const v = (e.clientY - rect.top) / rect.height;
 
-    const s = scale.value;
+    // Read PENDING state — the latest value this frame, not the committed
+    // ref which may lag a frame behind.
+    const s = pendingScale;
     // Image point currently under the cursor. At s=1 the transform is
     // identity, so the image point equals the cursor position directly.
-    const ix = s === 1 ? u : (u - originX.value * (1 - s)) / s;
-    const iy = s === 1 ? v : (v - originY.value * (1 - s)) / s;
+    const ix = s === 1 ? u : (u - pendingOriginX * (1 - s)) / s;
+    const iy = s === 1 ? v : (v - pendingOriginY * (1 - s)) / s;
 
     // Exponential zoom feels more natural than linear. ~120 per wheel
     // "click" on typical mice → factor ≈ e^(-0.24) ≈ 0.79 per tick out.
@@ -93,9 +124,10 @@ export function useSyncedZoom(): SyncedZoom {
     if (newScale <= MIN_SCALE) {
       // Fully zoomed out — reset to center to avoid a stale off-center
       // origin that would make the next zoom-in feel lopsided.
-      scale.value = MIN_SCALE;
-      originX.value = 0.5;
-      originY.value = 0.5;
+      pendingScale = MIN_SCALE;
+      pendingOriginX = 0.5;
+      pendingOriginY = 0.5;
+      scheduleCommit();
       return;
     }
 
@@ -107,17 +139,18 @@ export function useSyncedZoom(): SyncedZoom {
     const rawOriginX = (u - ix * newScale) / (1 - newScale);
     const rawOriginY = (v - iy * newScale) / (1 - newScale);
 
-    scale.value = newScale;
+    pendingScale = newScale;
     // Clamping origin to [0,1] means at image edges the cursor-anchor
     // won't hold perfectly, but it guarantees the transform-origin stays
     // within the image (no surprise empty margins).
-    originX.value = clamp(rawOriginX, 0, 1);
-    originY.value = clamp(rawOriginY, 0, 1);
+    pendingOriginX = clamp(rawOriginX, 0, 1);
+    pendingOriginY = clamp(rawOriginY, 0, 1);
+    scheduleCommit();
   }
 
   function onMouseDown(e: MouseEvent, pane: HTMLElement) {
     // Nothing to pan at scale 1 (whole image already visible).
-    if (scale.value <= MIN_SCALE) return;
+    if (pendingScale <= MIN_SCALE) return;
     // Left button only — right-click and middle-click stay free for the
     // browser / future handlers.
     if (e.button !== 0) return;
@@ -126,19 +159,20 @@ export function useSyncedZoom(): SyncedZoom {
     const rect = pane.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
 
-    const startOriginX = originX.value;
-    const startOriginY = originY.value;
+    const startOriginX = pendingOriginX;
+    const startOriginY = pendingOriginY;
     const startClientX = e.clientX;
     const startClientY = e.clientY;
-    const s = scale.value;
+    const s = pendingScale;
 
     function onMove(ev: MouseEvent) {
       const du = (ev.clientX - startClientX) / rect.width;
       const dv = (ev.clientY - startClientY) / rect.height;
       // Pan math: originX' = originX - du/(s-1). Derivation in the file
-      // header comment.
-      originX.value = clamp(startOriginX - du / (s - 1), 0, 1);
-      originY.value = clamp(startOriginY - dv / (s - 1), 0, 1);
+      // header comment. Writes pending; committed to the ref once per frame.
+      pendingOriginX = clamp(startOriginX - du / (s - 1), 0, 1);
+      pendingOriginY = clamp(startOriginY - dv / (s - 1), 0, 1);
+      scheduleCommit();
     }
 
     function onUp() {
@@ -151,10 +185,19 @@ export function useSyncedZoom(): SyncedZoom {
   }
 
   function reset() {
+    pendingScale = 1;
+    pendingOriginX = 0.5;
+    pendingOriginY = 0.5;
+    // Drop any queued frame so a stale wheel/pan commit can't clobber the
+    // reset, then commit synchronously — reset is user-initiated and rare,
+    // and the "Reset zoom" button's disabled state should flip immediately.
+    cancelPendingCommit();
     scale.value = 1;
     originX.value = 0.5;
     originY.value = 0.5;
   }
+
+  onScopeDispose(cancelPendingCommit);
 
   return {
     scale,

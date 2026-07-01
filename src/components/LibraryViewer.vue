@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useLibraryStore } from "@/stores/library";
 import { fileUrl } from "@/lib/commands";
+import { decodeAhead } from "@/composables/useHoverPreload";
 import StarRating from "@/components/StarRating.vue";
 
 const store = useLibraryStore();
@@ -17,14 +18,15 @@ const imageSrc = computed(() => {
   return fileUrl(image.value.file_path);
 });
 
-// Progressive loading: show thumbnail instantly, crossfade to full-res.
-// Fall back to the full file path when no thumbnail is cached so the
-// view-transition snapshot always has content to render.
+// Progressive loading: show a cached thumbnail instantly, crossfade to
+// full-res. When no thumbnail is cached we return "" rather than the full
+// file — decoding the full-res image just to use it as its own placeholder
+// stalls the swap it's meant to hide.
 const thumbnailSrc = computed(() => {
   if (!image.value) return "";
   const thumbPath = store.thumbnailPaths.get(image.value.id);
   if (thumbPath) return fileUrl(thumbPath);
-  return fileUrl(image.value.file_path);
+  return "";
 });
 
 const fullResLoaded = ref(false);
@@ -41,7 +43,9 @@ function onFullResLoad() {
   fullResLoaded.value = true;
 }
 
-// Adjacent image preloading: preload prev, next, and next+1
+// Adjacent image decode-ahead: warm prev, next, and next+1 so the swap to
+// full-res is instant. decodeAhead runs img.decode() off the nav path and
+// retains the decoded bitmap in a shared, bounded LRU.
 watch(
   () => store.currentIndex,
   (newIdx) => {
@@ -49,9 +53,7 @@ watch(
     for (const offset of [-1, 1, 2]) {
       const adjIdx = newIdx + offset;
       if (adjIdx >= 0 && adjIdx < imgs.length) {
-        const adjImage = imgs[adjIdx];
-        const img = new Image();
-        img.src = fileUrl(adjImage.file_path);
+        decodeAhead(fileUrl(imgs[adjIdx].file_path));
       }
     }
   },
@@ -130,6 +132,7 @@ function onRating(r: number) {
         :alt="image.id"
         :class="['full-image', { loaded: fullResLoaded }]"
         :key="'full-' + image.id"
+        decoding="async"
         @load="onFullResLoad"
       />
 

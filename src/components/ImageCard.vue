@@ -38,12 +38,25 @@ const thumbnailSrc = computed(() => {
     if (ptpCached) {
       return fileUrl(ptpCached);
     }
-    // PTP images without cache: show placeholder (thumbnails generated during catalog)
+    // PTP previews require a camera download; shimmer until one lands rather
+    // than falling through to the HIF fallback (a ptp:// path can't be loaded
+    // directly via the asset protocol).
     return "";
   }
-  // Fall back to HIF via asset protocol
-  return fileUrl(props.image.hif_path);
+  // A mass-storage image with a RAF sibling has a thumbnail in flight
+  // (loadThumbnails only processes images where raf_path is set), so show the
+  // shimmer skeleton rather than decoding the multi-MB HIF as a stand-in —
+  // that stalls the grid. But an image with no RAF sibling (HEIF-only or
+  // JPEG-only shoot) never gets a generated thumbnail, so fall back to the
+  // HEIF/JPEG itself; otherwise the card shimmers forever and never shows the
+  // photo. loading="lazy" + content-visibility keep this to on-screen decodes.
+  if (!props.image.raf_path) {
+    return fileUrl(props.image.hif_path);
+  }
+  return "";
 });
+
+const hasThumbnail = computed(() => thumbnailSrc.value !== "");
 
 const borderClass = computed(() => {
   const r = rating.value;
@@ -86,7 +99,12 @@ function openInViewer(e: MouseEvent) {
 <template>
   <div :class="['image-card', borderClass]" @click="openInViewer" @mouseenter="onMouseEnter" @mouseleave="cancelPreload">
     <div class="thumbnail-container" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
-      <img :src="thumbnailSrc" :alt="image.id" class="thumbnail" loading="lazy" />
+      <!-- Shimmer skeleton while the thumbnail generates -->
+      <div v-if="!hasThumbnail" class="thumbnail-skeleton">
+        <div class="skeleton-shimmer"></div>
+      </div>
+
+      <img v-else :src="thumbnailSrc" :alt="image.id" class="thumbnail" loading="lazy" />
 
       <!-- Compare mark pip: opposite corner from the star badge -->
       <div class="compare-pip" v-if="marked" title="Marked for comparison (M to unmark)">
@@ -134,6 +152,10 @@ function openInViewer(e: MouseEvent) {
   cursor: pointer;
   border: 2px solid transparent;
   transition: all var(--transition-medium);
+  /* Skip layout/paint for off-screen cards. The intrinsic-size hint keeps
+     the scrollbar stable so scroll-restore lands. No-op below macOS 13. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 280px;
 }
 
 .image-card:hover {
@@ -167,6 +189,33 @@ function openInViewer(e: MouseEvent) {
 
 .image-card:hover .thumbnail {
   transform: scale(1.03);
+}
+
+/* Skeleton shimmer placeholder — shown until a thumbnail is cached */
+.thumbnail-skeleton {
+  position: absolute;
+  inset: 0;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.skeleton-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(196, 162, 78, 0.04) 45%,
+    rgba(196, 162, 78, 0.06) 50%,
+    rgba(196, 162, 78, 0.04) 55%,
+    transparent 70%
+  );
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 /* Hover overlay */

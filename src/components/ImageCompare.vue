@@ -197,6 +197,7 @@ function clearAllAndExit() {
             :alt="img.id"
             class="pane-img pane-full"
             :style="{ transform: zoomTransform, transformOrigin: zoomOrigin }"
+            decoding="async"
             draggable="false"
           />
 
