@@ -72,6 +72,13 @@ export const useGalleryStore = defineStore("gallery", () => {
   // Computed
   const currentImage = computed(() => images.value[currentIndex.value] ?? null);
 
+  // Stable id → image lookup. Rebuilt only when `images` is replaced (not on
+  // rating changes), so callers resolving arbitrary ids — e.g. compare panes
+  // walking `markedForCompare` — avoid building their own Map on every render.
+  const imageById = computed(
+    () => new Map(images.value.map((img) => [img.id, img]))
+  );
+
   // Derive selection from rating
   function selectionFromRating(rating: number): SelectionChoice {
     if (rating === 0) return "Skip";
@@ -557,6 +564,7 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     // Computed
     currentImage,
+    imageById,
     selectionSummary,
     totalImportSize,
     canImport,
