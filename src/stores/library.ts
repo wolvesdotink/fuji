@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed, shallowRef } from "vue";
+import { ref, computed, shallowRef, watch } from "vue";
 import { homeDir, join } from "@tauri-apps/api/path";
 import type { LibraryImage, SearchResult } from "@/types";
 import {
@@ -26,6 +26,13 @@ export const useLibraryStore = defineStore("library", () => {
   const currentIndex = ref(0);
   const viewMode = ref<"grid" | "single">("grid");
   const sortBy = ref<"created" | "updated" | "stars">("created");
+
+  // While in single (viewer) mode we freeze the stars-sort order against a
+  // snapshot of ratings taken on entry. Otherwise rating the on-screen photo
+  // re-sorts displayImages beneath the viewer, and currentImage (= displayImages
+  // [currentIndex]) jumps to whatever now occupies that slot. Null in grid mode
+  // → live ratings drive the sort as before.
+  const frozenRatings = shallowRef<Map<string, number> | null>(null);
 
   // Ratings
   const ratings = ref<Map<string, number>>(new Map()); // file_path → 1-5
@@ -67,7 +74,10 @@ export const useLibraryStore = defineStore("library", () => {
         sorted.sort((a, b) => b.date_modified - a.date_modified);
         break;
       case "stars": {
-        const r = ratings.value;
+        // In single view read the frozen snapshot so rating the current photo
+        // doesn't re-sort under the viewer. `?? ratings.value` short-circuits
+        // in grid mode, so the sort still tracks live ratings there.
+        const r = frozenRatings.value ?? ratings.value;
         sorted.sort((a, b) => {
           const rA = r.get(a.file_path) ?? 0;
           const rB = r.get(b.file_path) ?? 0;
@@ -87,6 +97,18 @@ export const useLibraryStore = defineStore("library", () => {
 
   const currentImage = computed(
     () => displayImages.value[currentIndex.value] ?? null
+  );
+
+  // Snapshot ratings the instant we enter single view, and drop the snapshot
+  // on the way back to grid. flush: "sync" is required: the snapshot must be
+  // in place before displayImages re-evaluates in the same tick as the
+  // viewMode flip, otherwise the first read would still see live ratings.
+  watch(
+    viewMode,
+    (mode) => {
+      frozenRatings.value = mode === "single" ? new Map(ratings.value) : null;
+    },
+    { flush: "sync" }
   );
 
   const searchScores = computed(() => {
