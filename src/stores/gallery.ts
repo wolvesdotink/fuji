@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, shallowRef } from "vue";
 import type {
   CameraVolume,
   ImagePair,
@@ -22,6 +22,7 @@ import {
   readFileRatings,
 } from "@/lib/commands";
 import { useAppStore } from "@/stores/app";
+import { deriveSelectionSummary } from "@/lib/selectionSummary";
 
 export const useGalleryStore = defineStore("gallery", () => {
   // Camera state
@@ -31,8 +32,10 @@ export const useGalleryStore = defineStore("gallery", () => {
   // but returned zero results; any other value is a hard error message.
   const detectionError = ref<string | null>(null);
 
-  // Images
-  const images = ref<ImagePair[]>([]);
+  // Images. Image records are immutable — the array is only ever replaced
+  // wholesale, never mutated in place — so shallowRef avoids deep-proxying
+  // every record (and re-tracking them on every dependency read).
+  const images = shallowRef<ImagePair[]>([]);
   const thumbnailPaths = ref<Map<string, string>>(new Map());
   const isLoadingThumbnails = ref(false);
   const thumbnailProgress = ref({ completed: 0, total: 0 });
@@ -69,8 +72,11 @@ export const useGalleryStore = defineStore("gallery", () => {
   // Computed
   const currentImage = computed(() => images.value[currentIndex.value] ?? null);
 
-  const unreviewed = computed(() =>
-    images.value.filter((img) => !ratings.value.has(img.id))
+  // Stable id → image lookup. Rebuilt only when `images` is replaced (not on
+  // rating changes), so callers resolving arbitrary ids — e.g. compare panes
+  // walking `markedForCompare` — avoid building their own Map on every render.
+  const imageById = computed(
+    () => new Map(images.value.map((img) => [img.id, img]))
   );
 
   // Derive selection from rating
@@ -80,57 +86,20 @@ export const useGalleryStore = defineStore("gallery", () => {
     return "HeifAndRaw";
   }
 
-  const selectedForImport = computed(() =>
-    images.value.filter((img) => {
-      const rating = ratings.value.get(img.id);
-      return rating && rating > 0;
-    })
+  // One O(n) pass produces every selection stat (counts + import bytes).
+  // Previously `unreviewed`, `selectedForImport`, `selectionSummary` and
+  // `totalImportSize` each walked the whole gallery and re-ran on every
+  // rating change — four passes per keystroke over 1-5k images.
+  const selectionSummary = computed(() =>
+    deriveSelectionSummary(images.value, ratings.value)
   );
 
-  const selectionSummary = computed(() => {
-    let skip = 0;
-    let heifOnly = 0;
-    let heifAndRaw = 0;
-
-    for (const img of images.value) {
-      const rating = ratings.value.get(img.id);
-      if (!rating || rating === 0) {
-        skip++;
-      } else if (rating <= 3) {
-        heifOnly++;
-      } else {
-        heifAndRaw++;
-      }
-    }
-
-    return {
-      total: images.value.length,
-      skip,
-      heifOnly,
-      heifAndRaw,
-      reviewed: heifOnly + heifAndRaw + (images.value.length - unreviewed.value.length - heifOnly - heifAndRaw),
-      remaining: unreviewed.value.length,
-      toImport: heifOnly + heifAndRaw,
-    };
-  });
-
-  const totalImportSize = computed(() => {
-    let bytes = 0;
-    for (const img of images.value) {
-      const rating = ratings.value.get(img.id);
-      if (!rating || rating === 0) continue;
-      bytes += img.hif_size;
-      if (rating >= 4 && img.raf_size) {
-        bytes += img.raf_size;
-      }
-    }
-    return bytes;
-  });
+  const totalImportSize = computed(() => selectionSummary.value.bytes);
 
   const canImport = computed(
     () =>
       importDestination.value &&
-      selectedForImport.value.length > 0 &&
+      selectionSummary.value.toImport > 0 &&
       importState.value === "idle"
   );
 
@@ -595,8 +564,7 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     // Computed
     currentImage,
-    unreviewed,
-    selectedForImport,
+    imageById,
     selectionSummary,
     totalImportSize,
     canImport,

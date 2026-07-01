@@ -17,9 +17,10 @@ const {
 } = useSyncedZoom();
 
 // Resolve marked IDs → ImagePair[], preserving the insertion order from
-// the Set. A lookup map is cheaper than filter() for large galleries.
+// the Set. Reuse the store's shared id → image map so we don't rebuild a
+// lookup over the whole gallery on every marked-set change.
 const panes = computed<ImagePair[]>(() => {
-  const byId = new Map(store.images.map((img) => [img.id, img]));
+  const byId = store.imageById;
   const out: ImagePair[] = [];
   for (const id of store.markedForCompare) {
     const img = byId.get(id);

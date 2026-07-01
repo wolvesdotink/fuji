@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, shallowRef, watch } from "vue";
 import { homeDir, join } from "@tauri-apps/api/path";
 import type { LibraryImage, SearchResult } from "@/types";
 import {
@@ -13,8 +13,10 @@ import {
 } from "@/lib/commands";
 
 export const useLibraryStore = defineStore("library", () => {
-  // Images
-  const images = ref<LibraryImage[]>([]);
+  // Images. Image records are immutable — the array is only ever replaced
+  // wholesale, never mutated in place — so shallowRef avoids deep-proxying
+  // thousands of records (and re-tracking them on every dependency read).
+  const images = shallowRef<LibraryImage[]>([]);
   const thumbnailPaths = ref<Map<string, string>>(new Map());
   const isLoading = ref(false);
   const isLoadingThumbnails = ref(false);
@@ -24,6 +26,13 @@ export const useLibraryStore = defineStore("library", () => {
   const currentIndex = ref(0);
   const viewMode = ref<"grid" | "single">("grid");
   const sortBy = ref<"created" | "updated" | "stars">("created");
+
+  // While in single (viewer) mode we freeze the stars-sort order against a
+  // snapshot of ratings taken on entry. Otherwise rating the on-screen photo
+  // re-sorts displayImages beneath the viewer, and currentImage (= displayImages
+  // [currentIndex]) jumps to whatever now occupies that slot. Null in grid mode
+  // → live ratings drive the sort as before.
+  const frozenRatings = shallowRef<Map<string, number> | null>(null);
 
   // Ratings
   const ratings = ref<Map<string, number>>(new Map()); // file_path → 1-5
@@ -65,7 +74,10 @@ export const useLibraryStore = defineStore("library", () => {
         sorted.sort((a, b) => b.date_modified - a.date_modified);
         break;
       case "stars": {
-        const r = ratings.value;
+        // In single view read the frozen snapshot so rating the current photo
+        // doesn't re-sort under the viewer. `?? ratings.value` short-circuits
+        // in grid mode, so the sort still tracks live ratings there.
+        const r = frozenRatings.value ?? ratings.value;
         sorted.sort((a, b) => {
           const rA = r.get(a.file_path) ?? 0;
           const rB = r.get(b.file_path) ?? 0;
@@ -85,6 +97,18 @@ export const useLibraryStore = defineStore("library", () => {
 
   const currentImage = computed(
     () => displayImages.value[currentIndex.value] ?? null
+  );
+
+  // Snapshot ratings the instant we enter single view, and drop the snapshot
+  // on the way back to grid. flush: "sync" is required: the snapshot must be
+  // in place before displayImages re-evaluates in the same tick as the
+  // viewMode flip, otherwise the first read would still see live ratings.
+  watch(
+    viewMode,
+    (mode) => {
+      frozenRatings.value = mode === "single" ? new Map(ratings.value) : null;
+    },
+    { flush: "sync" }
   );
 
   const searchScores = computed(() => {
@@ -148,9 +172,12 @@ export const useLibraryStore = defineStore("library", () => {
         const filePaths = images.value.map((img) => img.file_path);
         readFileRatings(filePaths)
           .then((fileRatings) => {
+            // Build the id → image lookup once (O(n)). The previous
+            // images.value.find() per returned rating was O(n) each, i.e.
+            // O(n^2) across a full library of camera-set ratings.
+            const imageById = new Map(images.value.map((i) => [i.id, i]));
             for (const [stem, rating] of Object.entries(fileRatings)) {
-              // Find the image with this stem to get its file_path
-              const img = images.value.find((i) => i.id === stem);
+              const img = imageById.get(stem);
               if (img) {
                 ratings.value.set(img.file_path, rating);
               }
@@ -187,9 +214,12 @@ export const useLibraryStore = defineStore("library", () => {
         images.value.map((img) => img.id),
         cacheDir,
         (progress) => {
+          // In-place .set only — Vue wraps the Map reactively and tracks
+          // has/get per key, so only the card observing this image_id
+          // recomputes. Reassigning `new Map(...)` here invalidated every
+          // card's thumbnail lookup on each thumbnail, an O(n) storm per
+          // file → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
           thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
-          // Trigger reactivity
-          thumbnailPaths.value = new Map(thumbnailPaths.value);
           thumbnailProgress.value = {
             completed: progress.completed,
             total: progress.total,
