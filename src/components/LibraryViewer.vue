@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useLibraryStore } from "@/stores/library";
 import { fileUrl } from "@/lib/commands";
+import { decodeAhead } from "@/composables/useHoverPreload";
 import StarRating from "@/components/StarRating.vue";
 
 const store = useLibraryStore();
@@ -42,7 +43,9 @@ function onFullResLoad() {
   fullResLoaded.value = true;
 }
 
-// Adjacent image preloading: preload prev, next, and next+1
+// Adjacent image decode-ahead: warm prev, next, and next+1 so the swap to
+// full-res is instant. decodeAhead runs img.decode() off the nav path and
+// retains the decoded bitmap in a shared, bounded LRU.
 watch(
   () => store.currentIndex,
   (newIdx) => {
@@ -50,9 +53,7 @@ watch(
     for (const offset of [-1, 1, 2]) {
       const adjIdx = newIdx + offset;
       if (adjIdx >= 0 && adjIdx < imgs.length) {
-        const adjImage = imgs[adjIdx];
-        const img = new Image();
-        img.src = fileUrl(adjImage.file_path);
+        decodeAhead(fileUrl(imgs[adjIdx].file_path));
       }
     }
   },

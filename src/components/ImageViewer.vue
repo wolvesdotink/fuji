@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useGalleryStore } from "@/stores/gallery";
 import { fileUrl } from "@/lib/commands";
+import { decodeAhead } from "@/composables/useHoverPreload";
 import StarRating from "@/components/StarRating.vue";
 
 const store = useGalleryStore();
@@ -86,19 +87,30 @@ function onFullResLoad() {
   fullResLoaded.value = true;
 }
 
-// Adjacent image preloading: preload prev, next, and next+1
+// Adjacent image decode-ahead: warm prev, next, and next+1 so the swap to
+// full-res is instant. decodeAhead runs img.decode() off the nav path and
+// retains the decoded bitmap in a shared, bounded LRU.
 watch(
   () => store.currentIndex,
   (newIdx) => {
     const imgs = store.images;
+    const ptp = store.isPtp();
     for (const offset of [-1, 1, 2]) {
       const adjIdx = newIdx + offset;
-      if (adjIdx >= 0 && adjIdx < imgs.length) {
-        const adjImage = imgs[adjIdx];
-        if (!adjImage.hif_path.startsWith("ptp://")) {
-          const img = new Image();
-          img.src = fileUrl(adjImage.hif_path);
+      if (adjIdx < 0 || adjIdx >= imgs.length) continue;
+      const adjImage = imgs[adjIdx];
+      if (adjImage.hif_path.startsWith("ptp://")) {
+        // PTP neighbors must be downloaded from the camera first. Limit to
+        // the immediate neighbors [-1, 1] to bound camera bandwidth;
+        // ensurePtpPreview dedups in-flight + cached requests.
+        if (ptp && (offset === -1 || offset === 1)) {
+          store
+            .ensurePtpPreview(adjImage.id, adjImage.hif_path)
+            .then((localPath) => decodeAhead(fileUrl(localPath)))
+            .catch(() => {});
         }
+      } else {
+        decodeAhead(fileUrl(adjImage.hif_path));
       }
     }
   },
