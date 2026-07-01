@@ -38,12 +38,13 @@ const thumbnailSrc = computed(() => {
     if (ptpCached) {
       return fileUrl(ptpCached);
     }
-    // PTP images without cache: show placeholder (thumbnails generated during catalog)
-    return "";
   }
-  // Fall back to HIF via asset protocol
-  return fileUrl(props.image.hif_path);
+  // No thumbnail yet — show the shimmer skeleton rather than decoding the
+  // full-res HIF as a stand-in (that stalls the grid on multi-MB decodes).
+  return "";
 });
+
+const hasThumbnail = computed(() => thumbnailSrc.value !== "");
 
 const borderClass = computed(() => {
   const r = rating.value;
@@ -86,7 +87,12 @@ function openInViewer(e: MouseEvent) {
 <template>
   <div :class="['image-card', borderClass]" @click="openInViewer" @mouseenter="onMouseEnter" @mouseleave="cancelPreload">
     <div class="thumbnail-container" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
-      <img :src="thumbnailSrc" :alt="image.id" class="thumbnail" loading="lazy" />
+      <!-- Shimmer skeleton while the thumbnail generates -->
+      <div v-if="!hasThumbnail" class="thumbnail-skeleton">
+        <div class="skeleton-shimmer"></div>
+      </div>
+
+      <img v-else :src="thumbnailSrc" :alt="image.id" class="thumbnail" loading="lazy" />
 
       <!-- Compare mark pip: opposite corner from the star badge -->
       <div class="compare-pip" v-if="marked" title="Marked for comparison (M to unmark)">
@@ -171,6 +177,33 @@ function openInViewer(e: MouseEvent) {
 
 .image-card:hover .thumbnail {
   transform: scale(1.03);
+}
+
+/* Skeleton shimmer placeholder — shown until a thumbnail is cached */
+.thumbnail-skeleton {
+  position: absolute;
+  inset: 0;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.skeleton-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 30%,
+    rgba(196, 162, 78, 0.04) 45%,
+    rgba(196, 162, 78, 0.06) 50%,
+    rgba(196, 162, 78, 0.04) 55%,
+    transparent 70%
+  );
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 /* Hover overlay */
