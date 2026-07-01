@@ -2,7 +2,7 @@ use std::path::Path;
 
 use image::imageops::FilterType;
 use image::GenericImageView;
-use ndarray::Array4;
+use image::RgbImage;
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -11,9 +11,30 @@ const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 const IMAGE_SIZE: u32 = 224;
 
-/// Preprocess a JPEG thumbnail for CLIP: resize to 224x224 center crop,
-/// convert to RGB float32, normalize with CLIP mean/std.
-pub fn preprocess_image(image_path: &str) -> Result<Array4<f32>, String> {
+/// Pack a 224x224 RGB image into a flat CHW float32 buffer, normalized with the
+/// CLIP mean/std. Layout matches an ndarray `[1, 3, H, W]` in C-order: the flat
+/// index is `c * H * W + y * W + x`. Iterating the raw `RgbImage` buffer (HWC,
+/// tightly packed as r,g,b,r,g,b,…) avoids the per-pixel bounds checks and trait
+/// dispatch of `get_pixel`.
+fn pack_chw(rgb: &RgbImage) -> Vec<f32> {
+    let (w, h) = rgb.dimensions();
+    let plane = (w as usize) * (h as usize);
+    let mut data = vec![0f32; 3 * plane];
+
+    for (i, px) in rgb.as_raw().chunks_exact(3).enumerate() {
+        for c in 0..3 {
+            let val = px[c] as f32 / 255.0;
+            data[c * plane + i] = (val - CLIP_MEAN[c]) / CLIP_STD[c];
+        }
+    }
+
+    data
+}
+
+/// Preprocess a JPEG thumbnail for CLIP: center-crop to square, resize to
+/// 224x224, convert to RGB float32, normalize with CLIP mean/std. Returns a flat
+/// CHW `[1, 3, 224, 224]` buffer ready to hand to an ort `Tensor`.
+pub fn preprocess_image(image_path: &str) -> Result<Vec<f32>, String> {
     let img = image::open(Path::new(image_path))
         .map_err(|e| format!("Failed to open image {}: {}", image_path, e))?;
 
@@ -24,34 +45,20 @@ pub fn preprocess_image(image_path: &str) -> Result<Array4<f32>, String> {
     let y_offset = (h - crop_size) / 2;
     let cropped = img.crop_imm(x_offset, y_offset, crop_size, crop_size);
 
-    // Resize to 224x224
-    let resized = cropped.resize_exact(IMAGE_SIZE, IMAGE_SIZE, FilterType::Lanczos3);
+    // Resize to 224x224. Triangle (bilinear) is markedly cheaper than Lanczos3
+    // and, at this thumbnail scale, produces embeddings that are effectively
+    // indistinguishable for retrieval.
+    let resized = cropped.resize_exact(IMAGE_SIZE, IMAGE_SIZE, FilterType::Triangle);
 
-    // Convert to float32 normalized array [1, 3, 224, 224]
-    let mut pixel_data = Array4::<f32>::zeros((1, 3, IMAGE_SIZE as usize, IMAGE_SIZE as usize));
-
-    for y in 0..IMAGE_SIZE {
-        for x in 0..IMAGE_SIZE {
-            let pixel = resized.get_pixel(x, y);
-            for c in 0..3 {
-                let val = pixel[c] as f32 / 255.0;
-                pixel_data[[0, c, y as usize, x as usize]] =
-                    (val - CLIP_MEAN[c]) / CLIP_STD[c];
-            }
-        }
-    }
-
-    Ok(pixel_data)
+    Ok(pack_chw(&resized.to_rgb8()))
 }
 
 /// Generate a CLIP image embedding from a thumbnail JPEG.
 /// Returns a normalized embedding vector.
 pub fn embed_image(session: &mut Session, image_path: &str) -> Result<Vec<f32>, String> {
-    let pixel_values = preprocess_image(image_path)?;
+    let data = preprocess_image(image_path)?;
 
-    // Convert Array4 to (shape, vec) for ort Tensor
     let shape = [1_usize, 3, IMAGE_SIZE as usize, IMAGE_SIZE as usize];
-    let data: Vec<f32> = pixel_values.into_raw_vec_and_offset().0;
     let input_tensor = Tensor::from_array((shape, data))
         .map_err(|e| format!("Failed to create input tensor: {}", e))?;
 
@@ -96,4 +103,49 @@ pub fn l2_normalize(v: &[f32]) -> Vec<f32> {
         return v.to_vec();
     }
     v.iter().map(|x| x / norm).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    /// The raw-buffer CHW packer must produce byte-for-byte the same layout and
+    /// values as the previous per-pixel `get_pixel` approach: a `[1, 3, H, W]`
+    /// C-order tensor with `data[c * H * W + y * W + x] = (v/255 - mean)/std`.
+    #[test]
+    fn pack_chw_matches_get_pixel_reference() {
+        let (w, h) = (5u32, 3u32);
+        // Deterministic, distinct-per-channel pixel values so a transposed or
+        // mis-strided layout would fail the comparison.
+        let mut img = RgbImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let base = (y * w + x) as u8;
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([base, base.wrapping_add(50), base.wrapping_add(100)]),
+                );
+            }
+        }
+
+        let packed = pack_chw(&img);
+
+        let plane = (w * h) as usize;
+        assert_eq!(packed.len(), 3 * plane);
+
+        // Reference: the exact loop the old preprocess_image ran.
+        for y in 0..h {
+            for x in 0..w {
+                let pixel = img.get_pixel(x, y);
+                for c in 0..3 {
+                    let val = pixel[c] as f32 / 255.0;
+                    let expected = (val - CLIP_MEAN[c]) / CLIP_STD[c];
+                    let idx = c * plane + (y * w + x) as usize;
+                    assert_eq!(packed[idx], expected, "mismatch at c={c} y={y} x={x}");
+                }
+            }
+        }
+    }
 }

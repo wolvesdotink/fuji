@@ -7,6 +7,11 @@ edition = "2021"
 name = "fuji_culler_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+# Off by default: the quantized CLIP models regress badly on the CoreML EP, so
+# it is opt-in only (`--features coreml`) for experimentation. See clip/engine.rs.
+coreml = ["ort/coreml"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -32,3 +37,18 @@ ndarray = "0.16"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"] }
 futures-util = "0.3"
+
+# Optimize the release binary: whole-program LTO, a single codegen unit for
+# better cross-crate inlining, and stripped symbols for a smaller bundle. These
+# mainly benefit the ONNX/CLIP inference hot paths. (No panic = "abort" — the
+# updater/plugin stack expects unwinding.)
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Build dependencies (ort, image, tokenizers, …) with full optimization even in
+# dev so debug-mode indexing/search is not painfully slow. Our own crate stays
+# at the dev default for fast rebuilds.
+[profile.dev.package."*"]
+opt-level = 3
