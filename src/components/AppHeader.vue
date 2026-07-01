@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGalleryStore } from "@/stores/gallery";
 import { useAppStore } from "@/stores/app";
+import { buildMinimapSegments, minimapBucketOf } from "@/lib/minimap";
 
 const store = useGalleryStore();
 const appStore = useAppStore();
@@ -15,12 +16,25 @@ const reviewPercent = computed(() => {
   return Math.round((summary.value.reviewed / total) * 100);
 });
 
-function segmentStatus(imageId: string): string {
-  const rating = store.ratings.get(imageId);
-  if (!rating || rating === 0) return "seg-unreviewed";
-  if (rating <= 3) return "seg-heif";
-  return "seg-heif-raw";
-}
+// Aggregated minimap segments. A single computed reads every rating once and
+// (for galleries over ~500 images) collapses them into at most 200 buckets, so
+// a rating change re-renders ~200 nodes instead of one <div>-per-image. Depends
+// only on `images` + `ratings`, so navigation alone doesn't recompute it.
+const minimapSegments = computed(() =>
+  buildMinimapSegments(store.images, store.ratings)
+);
+
+// The bucket holding the current image, highlighted only in single view. Kept
+// separate from `minimapSegments` so arrow-key navigation runs an O(1) update
+// rather than the O(n) aggregation pass.
+const currentSegment = computed(() => {
+  if (store.viewMode !== "single") return -1;
+  return minimapBucketOf(
+    store.currentIndex,
+    store.images.length,
+    minimapSegments.value.length
+  );
+});
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -160,13 +174,13 @@ function openCompare() {
       </div>
     </div>
 
-    <!-- Review minimap -->
+    <!-- Review minimap: aggregated to ~200 buckets for large galleries -->
     <div class="review-minimap" v-if="store.images.length > 0">
       <div
-        v-for="(img, i) in store.images"
-        :key="img.id"
-        :class="['minimap-seg', segmentStatus(img.id), { current: i === store.currentIndex && store.viewMode === 'single' }]"
-        @click="jumpTo(i)"
+        v-for="(seg, i) in minimapSegments"
+        :key="i"
+        :class="['minimap-seg', seg.status, { current: i === currentSegment }]"
+        @click="jumpTo(seg.repIndex)"
       />
     </div>
   </header>
