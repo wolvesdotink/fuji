@@ -134,6 +134,10 @@ function openInViewer(e: MouseEvent) {
   cursor: pointer;
   border: 2px solid transparent;
   transition: all var(--transition-medium);
+  /* Skip layout/paint for off-screen cards. The intrinsic-size hint keeps
+     the scrollbar stable so scroll-restore lands. No-op below macOS 13. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 280px;
 }
 
 .image-card:hover {
