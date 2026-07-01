@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 
 use crate::camera::ptp;
 use crate::index;
-use crate::models::{CameraSourceType, CameraVolume, ImagePair};
+use crate::models::{CameraSourceType, CameraVolume, ImagePair, IndexFingerprint};
 
 /// One /Volumes entry + whether it looks like a camera (has DCIM).
 #[derive(Debug, Serialize)]
@@ -203,7 +203,10 @@ fn camera_diagnostics_blocking() -> CameraDiagnostics {
 }
 
 /// List images from a mass-storage DCIM path.
-fn list_images_mass_storage(dcim_path: &str) -> Result<Vec<ImagePair>, String> {
+///
+/// Accumulates the index fingerprint during the same walk, so a cache miss
+/// costs one directory traversal instead of a separate fingerprint pass.
+fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFingerprint), String> {
     let dcim = Path::new(dcim_path);
     if !dcim.exists() {
         return Err(format!("DCIM path does not exist: {}", dcim_path));
@@ -214,6 +217,7 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<Vec<ImagePair>, String> {
         std::collections::HashMap::new();
     let mut raf_files: std::collections::HashMap<String, (String, u64)> =
         std::collections::HashMap::new();
+    let mut fingerprint = index::FingerprintAccumulator::default();
 
     for entry in WalkDir::new(dcim)
         .min_depth(1)
@@ -238,13 +242,20 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<Vec<ImagePair>, String> {
             .to_string_lossy()
             .to_string();
 
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let metadata = entry.metadata().ok();
+        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
 
         match ext.as_str() {
             "HIF" | "HEIF" | "HEIC" | "JPG" | "JPEG" => {
+                if let Some(m) = &metadata {
+                    fingerprint.add(m);
+                }
                 hif_files.insert(stem, (path.to_string_lossy().to_string(), size));
             }
             "RAF" => {
+                if let Some(m) = &metadata {
+                    fingerprint.add(m);
+                }
                 raf_files.insert(stem, (path.to_string_lossy().to_string(), size));
             }
             _ => {}
@@ -278,7 +289,7 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<Vec<ImagePair>, String> {
     // Sort by filename (which is chronological on Fuji cameras)
     pairs.sort_by(|a, b| a.id.cmp(&b.id));
 
-    Ok(pairs)
+    Ok((pairs, fingerprint.finish()))
 }
 
 /// List images from a PTP camera by running the catalog command.
@@ -343,29 +354,30 @@ pub async fn list_images(dcim_path: String, cache_dir: String) -> Result<Vec<Ima
             .map_err(|e| format!("Failed to create cache dir: {}", e))?;
         let index_path = cache.join("camera-index.json");
 
-        // Compute fingerprint for change detection
         let dcim = Path::new(&dcim_path);
         let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG", "RAF"];
-        if let Ok(fingerprint) = index::compute_fingerprint(dcim, extensions, Some(2)) {
-            // Try cached index
-            if let Some(cached) = index::try_cached::<ImagePair>(&index_path, &dcim_path, &fingerprint) {
-                log::info!("Using cached camera index ({} images)", cached.len());
-                return Ok(cached);
+
+        // Fast path: only when a cached index already exists do we pay the cheap
+        // fingerprint walk to validate it. On a match we skip the full scan,
+        // keeping repeat loads (HIT) at a single directory walk.
+        if index_path.exists() {
+            if let Ok(fingerprint) = index::compute_fingerprint(dcim, extensions, Some(2)) {
+                if let Some(cached) =
+                    index::try_cached::<ImagePair>(&index_path, &dcim_path, &fingerprint)
+                {
+                    log::info!("Using cached camera index ({} images)", cached.len());
+                    return Ok(cached);
+                }
             }
-
-            // Cache miss: do full walk
-            let images = list_images_mass_storage(&dcim_path)?;
-
-            // Save index for next time
-            if let Err(e) = index::cache_images(&index_path, &dcim_path, &fingerprint, &images) {
-                log::warn!("Failed to save camera index: {}", e);
-            }
-
-            Ok(images)
-        } else {
-            // Fingerprint failed, fall back to direct scan
-            list_images_mass_storage(&dcim_path)
         }
+
+        // Miss / first run: a single walk yields both the images and the
+        // fingerprint we persist for next time.
+        let (images, fingerprint) = list_images_mass_storage(&dcim_path)?;
+        if let Err(e) = index::cache_images(&index_path, &dcim_path, &fingerprint, &images) {
+            log::warn!("Failed to save camera index: {}", e);
+        }
+        Ok(images)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -432,4 +444,53 @@ pub async fn ptp_delete_files(
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fuji_{}_{}", tag, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) {
+        let mut f = fs::File::create(dir.join(name)).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    // The fingerprint folded into list_images_mass_storage must equal the one
+    // compute_fingerprint produces, including counting every HIF+RAF file (even
+    // duplicate stems that collapse into one pair) and honouring max_depth 2.
+    #[test]
+    fn mass_storage_fingerprint_matches_compute_fingerprint() {
+        let dir = unique_temp_dir("camscan");
+        let sub = dir.join("100FUJI"); // DCIM subdir at depth 1; files at depth 2
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub, "IMG_0001.HIF", b"hhhh"); // 4
+        write_file(&sub, "IMG_0001.RAF", b"rrrrrr"); // 6, same stem as the HIF
+        write_file(&sub, "IMG_0002.JPG", b"jj"); // 2
+        write_file(&sub, "note.txt", b"x"); // excluded extension
+        let deep = sub.join("deeper"); // depth 2 dir → its files are depth 3
+        fs::create_dir_all(&deep).unwrap();
+        write_file(&deep, "IMG_9999.HIF", b"zzzzzzzz"); // excluded by max_depth 2
+
+        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG", "RAF"];
+        let expected = index::compute_fingerprint(&dir, extensions, Some(2)).unwrap();
+        let (pairs, folded) = list_images_mass_storage(dir.to_str().unwrap()).unwrap();
+
+        assert_eq!(folded, expected);
+        assert_eq!(folded.file_count, 3); // HIF + RAF + JPG at depth 2
+        assert_eq!(folded.total_bytes, 12);
+        assert_eq!(pairs.len(), 2); // IMG_0001 (HIF+RAF) and IMG_0002 (JPG only)
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

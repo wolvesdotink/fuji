@@ -8,6 +8,44 @@ use crate::models::{ImageIndex, IndexFingerprint};
 
 const INDEX_VERSION: u32 = 1;
 
+/// Incrementally folds matched files into the same [`IndexFingerprint`] that
+/// [`compute_fingerprint`] produces. A full directory scan can accumulate this
+/// alongside its own results and emit the fingerprint from a single walk,
+/// avoiding a separate fingerprint pass on a cache miss / first run.
+#[derive(Default)]
+pub struct FingerprintAccumulator {
+    file_count: u64,
+    newest_mtime: u64,
+    total_bytes: u64,
+}
+
+impl FingerprintAccumulator {
+    /// Fold one matched file's metadata into the fingerprint. Callers must only
+    /// pass files that pass the same extension filter used by
+    /// `compute_fingerprint`, so the two agree byte-for-byte.
+    pub fn add(&mut self, metadata: &std::fs::Metadata) {
+        self.file_count += 1;
+        self.total_bytes += metadata.len();
+
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                let mtime = duration.as_secs();
+                if mtime > self.newest_mtime {
+                    self.newest_mtime = mtime;
+                }
+            }
+        }
+    }
+
+    pub fn finish(self) -> IndexFingerprint {
+        IndexFingerprint {
+            file_count: self.file_count,
+            newest_mtime: self.newest_mtime,
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
 /// Compute a lightweight fingerprint for a directory by walking it and collecting
 /// only file count, max mtime, and total bytes — no string allocation for paths/stems.
 pub fn compute_fingerprint(
@@ -19,9 +57,7 @@ pub fn compute_fingerprint(
         return Err(format!("Directory does not exist: {}", dir.display()));
     }
 
-    let mut file_count: u64 = 0;
-    let mut newest_mtime: u64 = 0;
-    let mut total_bytes: u64 = 0;
+    let mut acc = FingerprintAccumulator::default();
 
     let walker = if let Some(depth) = max_depth {
         WalkDir::new(dir).min_depth(1).max_depth(depth)
@@ -46,25 +82,11 @@ pub fn compute_fingerprint(
         }
 
         if let Ok(metadata) = entry.metadata() {
-            file_count += 1;
-            total_bytes += metadata.len();
-
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
-                    let mtime = duration.as_secs();
-                    if mtime > newest_mtime {
-                        newest_mtime = mtime;
-                    }
-                }
-            }
+            acc.add(&metadata);
         }
     }
 
-    Ok(IndexFingerprint {
-        file_count,
-        newest_mtime,
-        total_bytes,
-    })
+    Ok(acc.finish())
 }
 
 /// Load a cached index from a JSON file.

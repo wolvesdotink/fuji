@@ -11,7 +11,8 @@ use crate::clip;
 use crate::commands::thumbnails::thumb_file_name;
 use crate::index;
 use crate::models::{
-    IndexProgress, LibraryImage, ModelDownloadProgress, SearchResult, ThumbnailProgress,
+    IndexFingerprint, IndexProgress, LibraryImage, ModelDownloadProgress, SearchResult,
+    ThumbnailProgress,
 };
 
 /// List images from a destination/library directory.
@@ -36,37 +37,39 @@ pub async fn list_library_images(
 
         let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
 
-        // Compute fingerprint for change detection
-        if let Ok(fingerprint) = index::compute_fingerprint(dir, extensions, None) {
-            // Try cached index
-            if let Some(cached) =
-                index::try_cached::<LibraryImage>(&index_path, &dir_path, &fingerprint)
-            {
-                log::info!("Using cached library index ({} images)", cached.len());
-                return Ok(cached);
+        // Fast path: only when a cached index already exists do we pay the cheap
+        // fingerprint walk to validate it. On a match we skip the full scan,
+        // keeping repeat loads (HIT) at a single directory walk.
+        if index_path.exists() {
+            if let Ok(fingerprint) = index::compute_fingerprint(dir, extensions, None) {
+                if let Some(cached) =
+                    index::try_cached::<LibraryImage>(&index_path, &dir_path, &fingerprint)
+                {
+                    log::info!("Using cached library index ({} images)", cached.len());
+                    return Ok(cached);
+                }
             }
-
-            // Cache miss: do full walk
-            let images = scan_library_images(dir)?;
-
-            // Save index for next time
-            if let Err(e) = index::cache_images(&index_path, &dir_path, &fingerprint, &images) {
-                log::warn!("Failed to save library index: {}", e);
-            }
-
-            Ok(images)
-        } else {
-            // Fingerprint failed, fall back to direct scan
-            scan_library_images(dir)
         }
+
+        // Miss / first run: a single walk yields both the images and the
+        // fingerprint we persist for next time.
+        let (images, fingerprint) = scan_library_images(dir)?;
+        if let Err(e) = index::cache_images(&index_path, &dir_path, &fingerprint, &images) {
+            log::warn!("Failed to save library index: {}", e);
+        }
+        Ok(images)
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Full filesystem scan for library images.
-fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
+///
+/// Accumulates the index fingerprint during the same walk, so a cache miss
+/// costs one directory traversal instead of a separate fingerprint pass.
+fn scan_library_images(dir: &Path) -> Result<(Vec<LibraryImage>, IndexFingerprint), String> {
     let mut images: Vec<LibraryImage> = Vec::new();
+    let mut fingerprint = index::FingerprintAccumulator::default();
 
     for entry in WalkDir::new(dir)
         .min_depth(1)
@@ -102,6 +105,9 @@ fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
             .to_string();
 
         let metadata = entry.metadata().ok();
+        if let Some(m) = &metadata {
+            fingerprint.add(m);
+        }
         let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
         let date_created = metadata
             .as_ref()
@@ -128,7 +134,7 @@ fn scan_library_images(dir: &Path) -> Result<Vec<LibraryImage>, String> {
     // Sort by creation time descending (newest first)
     images.sort_by(|a, b| b.date_created.cmp(&a.date_created));
 
-    Ok(images)
+    Ok((images, fingerprint.finish()))
 }
 
 /// Generate thumbnails for library images.
@@ -378,4 +384,51 @@ fn search_library_blocking(
         .into_iter()
         .map(|(image_id, score)| SearchResult { image_id, score })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fuji_{}_{}", tag, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) {
+        let mut f = fs::File::create(dir.join(name)).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    // The fingerprint folded into scan_library_images must be identical to the
+    // one compute_fingerprint produces on its own walk — otherwise a fresh scan
+    // would cache a fingerprint that never matches on the next load.
+    #[test]
+    fn scan_fingerprint_matches_compute_fingerprint() {
+        let dir = unique_temp_dir("libscan");
+        write_file(&dir, "a.HIF", b"aaaa"); // 4 bytes
+        write_file(&dir, "b.jpg", b"bbbbbbbb"); // 8, lowercase ext
+        write_file(&dir, "c.JPEG", b"cc"); // 2
+        write_file(&dir, "ignore.txt", b"nope"); // excluded extension
+        let sub = dir.join("sub"); // library walk is unbounded depth
+        fs::create_dir_all(&sub).unwrap();
+        write_file(&sub, "d.heic", b"dddddd"); // 6, nested + lowercase
+
+        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
+        let expected = index::compute_fingerprint(&dir, extensions, None).unwrap();
+        let (images, folded) = scan_library_images(&dir).unwrap();
+
+        assert_eq!(folded, expected);
+        assert_eq!(folded.file_count, 4);
+        assert_eq!(folded.total_bytes, 20);
+        assert_eq!(images.len(), 4);
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }
