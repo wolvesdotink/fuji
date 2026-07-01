@@ -170,7 +170,7 @@ export const useLibraryStore = defineStore("library", () => {
         // the results as soon as they resolve — the grid can render ratings
         // without waiting for thumbnails.
         const filePaths = images.value.map((img) => img.file_path);
-        readFileRatings(filePaths)
+        readFileRatings(filePaths, indexCacheDir)
           .then((fileRatings) => {
             // Build the id → image lookup once (O(n)). The previous
             // images.value.find() per returned rating was O(n) each, i.e.

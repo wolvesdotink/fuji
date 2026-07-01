@@ -148,9 +148,10 @@ export async function saveConfig(
 // --- Ratings ---
 
 export async function readFileRatings(
-  filePaths: string[]
+  filePaths: string[],
+  cacheDir: string
 ): Promise<Record<string, number>> {
-  return invoke("read_file_ratings", { filePaths });
+  return invoke("read_file_ratings", { filePaths, cacheDir });
 }
 
 export async function writeFileRating(

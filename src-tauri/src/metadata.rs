@@ -1,12 +1,105 @@
 use rayon::prelude::*;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
+
+use crate::index;
 
 /// Maximum bytes to read when scanning for XMP Rating (256KB).
 /// XMP is always near the start of HIF/RAF/JPEG files.
 const READ_LIMIT: usize = 256 * 1024;
+
+/// Bump when the ratings-cache entry shape changes so stale caches are ignored.
+const RATINGS_CACHE_VERSION: u32 = 1;
+
+/// Fingerprint of a source image plus its optional `.xmp` sidecar. A missing
+/// file or sidecar contributes zeros, so the key still changes when either one
+/// appears, disappears, or is edited (mtime/size).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RatingKey {
+    mtime: u64,
+    size: u64,
+    sidecar_mtime: u64,
+    sidecar_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RatingCacheEntry {
+    key: RatingKey,
+    /// `None` records that the file was scanned and has no rating, so the
+    /// common (unrated) case is never re-scanned.
+    rating: Option<u8>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RatingsCache {
+    version: u32,
+    /// Keyed by the absolute image path.
+    entries: HashMap<String, RatingCacheEntry>,
+}
+
+/// `(mtime_secs, size)` for a path, or `(0, 0)` when it is absent/unreadable.
+fn file_meta(path: &Path) -> (u64, u64) {
+    match fs::metadata(path) {
+        Ok(m) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            (mtime, m.len())
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+/// Build the cache key from the image + its `.xmp` sidecar fingerprints.
+fn rating_key(path: &Path) -> RatingKey {
+    let (mtime, size) = file_meta(path);
+    let (sidecar_mtime, sidecar_size) = file_meta(&path.with_extension("xmp"));
+    RatingKey {
+        mtime,
+        size,
+        sidecar_mtime,
+        sidecar_size,
+    }
+}
+
+/// Read the rating for a single file: `.xmp` sidecar first, then embedded XMP.
+/// Returns `None` when the file carries no rating.
+fn scan_rating(path: &Path, file_path: &str, attr_re: &Regex, elem_re: &Regex) -> Option<u8> {
+    // 1. Check for .xmp sidecar file first (takes priority — user may have written it)
+    let sidecar_path = path.with_extension("xmp");
+    if sidecar_path.exists() {
+        if let Ok(sidecar_content) = fs::read_to_string(&sidecar_path) {
+            if let Some(r) = extract_rating(&sidecar_content, attr_re, elem_re) {
+                if (1..=5).contains(&r) {
+                    return Some(r);
+                }
+            }
+        }
+    }
+
+    // 2. Read embedded XMP from the image file
+    if !path.exists() {
+        return None;
+    }
+
+    let data = read_file_head(file_path, READ_LIMIT).ok()?;
+
+    // Extract the XMP packet as a string (XMP is always valid UTF-8/ASCII)
+    let xmp_str = extract_xmp_string(&data)?;
+    let r = extract_rating(&xmp_str, attr_re, elem_re)?;
+    if (1..=5).contains(&r) {
+        Some(r)
+    } else {
+        None
+    }
+}
 
 // Byte patterns for XMP packet markers (ASCII, safe to search in binary data)
 const XPACKET_BEGIN: &[u8] = b"<?xpacket begin=";
@@ -26,53 +119,68 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Read XMP ratings from multiple files.
 /// Returns a map of filename stem → rating (1-5). Files without ratings are omitted.
 /// Checks both embedded XMP in the image file AND .xmp sidecar files.
-pub fn read_ratings(file_paths: &[String]) -> Result<HashMap<String, u8>, String> {
+///
+/// Results are cached in `<cache_dir>/ratings-cache.json`, keyed by each file's
+/// path + mtime + size (and its sidecar's). Unchanged files — including unrated
+/// ones, recorded as `None` — skip the 256 KB read + XMP parse entirely, so the
+/// common case of re-opening a library never re-scans.
+pub fn read_ratings(file_paths: &[String], cache_dir: &Path) -> Result<HashMap<String, u8>, String> {
     let attr_re = Regex::new(r#"xmp:Rating="(\d)"#)
         .map_err(|e| format!("Failed to compile regex: {}", e))?;
     let elem_re = Regex::new(r#"<xmp:Rating>(\d)</xmp:Rating>"#)
         .map_err(|e| format!("Failed to compile regex: {}", e))?;
 
-    // Regexes are Sync, so workers share them while scanning files in parallel.
-    // A full camera card can carry hundreds of XMP packets to sift through, and
-    // each file is an independent read — ideal for a rayon fan-out.
-    let ratings = file_paths
-        .par_iter()
-        .filter_map(|file_path| {
-            let path = Path::new(file_path);
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+    // Load the previous cache (empty if missing or from an older version).
+    let cache_path = cache_dir.join("ratings-cache.json");
+    let previous: RatingsCache = index::read_json(&cache_path)
+        .ok()
+        .filter(|c: &RatingsCache| c.version == RATINGS_CACHE_VERSION)
+        .unwrap_or_default();
 
-            // 1. Check for .xmp sidecar file first (takes priority — user may have written it)
-            let sidecar_path = path.with_extension("xmp");
-            if sidecar_path.exists() {
-                if let Ok(sidecar_content) = fs::read_to_string(&sidecar_path) {
-                    if let Some(r) = extract_rating(&sidecar_content, &attr_re, &elem_re) {
-                        if (1..=5).contains(&r) {
-                            return Some((stem, r));
-                        }
-                    }
+    // Regexes and the cache are Sync/read-only, so workers share them while
+    // scanning files in parallel. Each path yields exactly one cache entry —
+    // reused on a fingerprint hit, otherwise re-read — so the persisted cache
+    // stays complete (including unrated files recorded as `None`).
+    let entries: Vec<(String, RatingCacheEntry)> = file_paths
+        .par_iter()
+        .map(|file_path| {
+            let path = Path::new(file_path);
+            let key = rating_key(path);
+
+            if let Some(hit) = previous.entries.get(file_path) {
+                if hit.key == key {
+                    return (file_path.clone(), hit.clone());
                 }
             }
 
-            // 2. Read embedded XMP from the image file
-            if !path.exists() {
-                return None;
-            }
-
-            let data = read_file_head(file_path, READ_LIMIT).ok()?;
-
-            // Extract the XMP packet as a string (XMP is always valid UTF-8/ASCII)
-            let xmp_str = extract_xmp_string(&data)?;
-            let r = extract_rating(&xmp_str, &attr_re, &elem_re)?;
-            if (1..=5).contains(&r) {
-                Some((stem, r))
-            } else {
-                None
-            }
+            let rating = scan_rating(path, file_path, &attr_re, &elem_re);
+            (file_path.clone(), RatingCacheEntry { key, rating })
         })
         .collect();
+
+    // Build the stem → rating result and the fresh cache to persist.
+    let mut ratings = HashMap::new();
+    let mut next = RatingsCache {
+        version: RATINGS_CACHE_VERSION,
+        entries: HashMap::with_capacity(entries.len()),
+    };
+    for (file_path, entry) in entries {
+        if let Some(r) = entry.rating {
+            let stem = Path::new(&file_path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            ratings.insert(stem, r);
+        }
+        next.entries.insert(file_path, entry);
+    }
+
+    // Persist best-effort — a cache write failure must not fail the read.
+    if let Err(e) = fs::create_dir_all(cache_dir) {
+        log::warn!("Failed to create ratings cache dir: {}", e);
+    } else if let Err(e) = index::write_json(&cache_path, &next) {
+        log::warn!("Failed to write ratings cache: {}", e);
+    }
 
     Ok(ratings)
 }
@@ -328,4 +436,83 @@ pub fn write_ratings_batch(file_ratings: &[(String, u8)]) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fuji_{}_{}", tag, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) {
+        let mut f = fs::File::create(dir.join(name)).unwrap();
+        f.write_all(bytes).unwrap();
+    }
+
+    // The cache key must be stable for an unchanged file and change whenever the
+    // image or its sidecar's mtime/size shifts — otherwise the cache would serve
+    // stale ratings (mismatch) or needlessly re-scan (spurious mismatch).
+    #[test]
+    fn rating_key_matches_until_file_or_sidecar_changes() {
+        let dir = unique_temp_dir("ratekey");
+        let img = dir.join("shot.HIF");
+        write_file(&dir, "shot.HIF", b"aaaa");
+
+        let k1 = rating_key(&img);
+        assert_eq!(k1, rating_key(&img), "unchanged file → identical key");
+
+        // Grow the file: size changes → key changes.
+        write_file(&dir, "shot.HIF", b"aaaabbbbcccc");
+        let k2 = rating_key(&img);
+        assert_ne!(k1, k2, "size change → new key");
+
+        // A newly-appearing sidecar changes the key.
+        write_file(&dir, "shot.xmp", br#"<x xmp:Rating="3"/>"#);
+        let k3 = rating_key(&img);
+        assert_ne!(k2, k3, "sidecar appearance → new key");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Rated files come back by stem, unrated files are recorded as `None`, and a
+    // second read is served from the persisted cache.
+    #[test]
+    fn ratings_cache_records_rated_and_unrated() {
+        let dir = unique_temp_dir("ratecache");
+        let cache = unique_temp_dir("ratecachedir");
+        write_file(&dir, "rated.HIF", b"stub");
+        write_file(&dir, "rated.xmp", br#"<?xpacket?><x xmp:Rating="4"/>"#);
+        write_file(&dir, "plain.HIF", b"no-xmp-here");
+        let rated = dir.join("rated.HIF").to_string_lossy().to_string();
+        let plain = dir.join("plain.HIF").to_string_lossy().to_string();
+
+        let result = read_ratings(&[rated.clone(), plain.clone()], &cache).unwrap();
+        assert_eq!(result.get("rated"), Some(&4));
+        assert_eq!(result.get("plain"), None);
+
+        let persisted: RatingsCache =
+            index::read_json(&cache.join("ratings-cache.json")).unwrap();
+        assert_eq!(persisted.version, RATINGS_CACHE_VERSION);
+        assert_eq!(persisted.entries.get(&rated).unwrap().rating, Some(4));
+        // Unrated file is recorded with `None` so it is never re-scanned.
+        assert!(persisted.entries.contains_key(&plain));
+        assert_eq!(persisted.entries.get(&plain).unwrap().rating, None);
+
+        // Second read (cache hit for both) returns identical results.
+        let again = read_ratings(&[rated, plain], &cache).unwrap();
+        assert_eq!(again.get("rated"), Some(&4));
+        assert_eq!(again.get("plain"), None);
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&cache).ok();
+    }
 }

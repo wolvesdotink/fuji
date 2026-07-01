@@ -89,18 +89,28 @@ pub fn compute_fingerprint(
     Ok(acc.finish())
 }
 
+/// Read and deserialize a value from a JSON file.
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let data = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    serde_json::from_str(&data).map_err(|e| format!("Failed to parse {}: {}", path.display(), e))
+}
+
+/// Serialize and write a value to a JSON file.
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let data = serde_json::to_string(value)
+        .map_err(|e| format!("Failed to serialize {}: {}", path.display(), e))?;
+    fs::write(path, data).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
 /// Load a cached index from a JSON file.
 pub fn load_index<T: DeserializeOwned>(index_path: &Path) -> Result<ImageIndex<T>, String> {
-    let data =
-        fs::read_to_string(index_path).map_err(|e| format!("Failed to read index: {}", e))?;
-    serde_json::from_str(&data).map_err(|e| format!("Failed to parse index: {}", e))
+    read_json(index_path)
 }
 
 /// Save an index to a JSON file.
 pub fn save_index<T: Serialize>(index_path: &Path, index: &ImageIndex<T>) -> Result<(), String> {
-    let data =
-        serde_json::to_string(index).map_err(|e| format!("Failed to serialize index: {}", e))?;
-    fs::write(index_path, data).map_err(|e| format!("Failed to write index: {}", e))
+    write_json(index_path, index)
 }
 
 /// Try to load a cached index and return it if the fingerprint matches.

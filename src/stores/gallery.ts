@@ -224,8 +224,10 @@ export const useGalleryStore = defineStore("gallery", () => {
       // concurrently with thumbnail generation and applies as soon as it
       // resolves, instead of gating thumbnails behind it.
       if (!isPtp()) {
+        const home = await homeDir();
+        const ratingsCacheDir = await join(home, ".cache", "fuji-culler");
         const hifPaths = images.value.map((img) => img.hif_path);
-        readFileRatings(hifPaths)
+        readFileRatings(hifPaths, ratingsCacheDir)
           .then((fileRatings) => {
             for (const [stem, rating] of Object.entries(fileRatings)) {
               ratings.value.set(stem, rating);
