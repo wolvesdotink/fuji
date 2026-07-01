@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -31,47 +32,47 @@ pub fn read_ratings(file_paths: &[String]) -> Result<HashMap<String, u8>, String
     let elem_re = Regex::new(r#"<xmp:Rating>(\d)</xmp:Rating>"#)
         .map_err(|e| format!("Failed to compile regex: {}", e))?;
 
-    let mut ratings = HashMap::new();
+    // Regexes are Sync, so workers share them while scanning files in parallel.
+    // A full camera card can carry hundreds of XMP packets to sift through, and
+    // each file is an independent read — ideal for a rayon fan-out.
+    let ratings = file_paths
+        .par_iter()
+        .filter_map(|file_path| {
+            let path = Path::new(file_path);
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
 
-    for file_path in file_paths {
-        let path = Path::new(file_path);
-        let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-
-        // 1. Check for .xmp sidecar file first (takes priority — user may have written it)
-        let sidecar_path = path.with_extension("xmp");
-        if sidecar_path.exists() {
-            if let Ok(sidecar_content) = fs::read_to_string(&sidecar_path) {
-                if let Some(r) = extract_rating(&sidecar_content, &attr_re, &elem_re) {
-                    if r >= 1 && r <= 5 {
-                        ratings.insert(stem, r);
-                        continue;
+            // 1. Check for .xmp sidecar file first (takes priority — user may have written it)
+            let sidecar_path = path.with_extension("xmp");
+            if sidecar_path.exists() {
+                if let Ok(sidecar_content) = fs::read_to_string(&sidecar_path) {
+                    if let Some(r) = extract_rating(&sidecar_content, &attr_re, &elem_re) {
+                        if (1..=5).contains(&r) {
+                            return Some((stem, r));
+                        }
                     }
                 }
             }
-        }
 
-        // 2. Read embedded XMP from the image file
-        if !path.exists() {
-            continue;
-        }
-
-        let data = match read_file_head(file_path, READ_LIMIT) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        // Extract the XMP packet as a string (XMP is always valid UTF-8/ASCII)
-        if let Some(xmp_str) = extract_xmp_string(&data) {
-            if let Some(r) = extract_rating(&xmp_str, &attr_re, &elem_re) {
-                if r >= 1 && r <= 5 {
-                    ratings.insert(stem, r);
-                }
+            // 2. Read embedded XMP from the image file
+            if !path.exists() {
+                return None;
             }
-        }
-    }
+
+            let data = read_file_head(file_path, READ_LIMIT).ok()?;
+
+            // Extract the XMP packet as a string (XMP is always valid UTF-8/ASCII)
+            let xmp_str = extract_xmp_string(&data)?;
+            let r = extract_rating(&xmp_str, &attr_re, &elem_re)?;
+            if (1..=5).contains(&r) {
+                Some((stem, r))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     Ok(ratings)
 }
