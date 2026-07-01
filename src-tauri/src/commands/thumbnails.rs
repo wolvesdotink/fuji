@@ -44,23 +44,17 @@ fn generate_thumbnails_blocking(
         .par_iter()
         .zip(raf_paths.par_iter())
         .filter_map(|(image_id, raf_path)| {
-            // `.v2.` suffix marks thumbnails generated with EXIF-orientation
-            // applied. Older un-suffixed `.webp`/`.jpg` files on disk had
-            // portrait shots baked in sideways — we ignore them and let this
-            // run regenerate correct ones.
-            let webp_path = cache.join(format!("{}.v2.webp", image_id));
-            let jpg_path = cache.join(format!("{}.v2.jpg", image_id));
+            // `thumb_file_name` yields `{id}.v3.jpg`. The `.v3` generation marks
+            // lossy-JPEG thumbnails with EXIF orientation baked into the pixels;
+            // older `.v2.*` (and un-suffixed) files are ignored and regenerated.
+            let thumb_path = cache.join(thumb_file_name(image_id));
 
-            let thumb_path = if webp_path.exists() {
-                webp_path
-            } else if jpg_path.exists() {
-                jpg_path
-            } else {
-                // Generate new WebP thumbnail from RAF
+            if !thumb_path.exists() {
+                // Generate a new JPEG thumbnail from the RAF preview.
                 let raf = Path::new(raf_path);
                 match preview::extract_thumbnail(raf, THUMBNAIL_MAX_WIDTH) {
-                    Ok(webp_bytes) => {
-                        if let Err(e) = fs::write(&webp_path, &webp_bytes) {
+                    Ok(jpeg_bytes) => {
+                        if let Err(e) = fs::write(&thumb_path, &jpeg_bytes) {
                             log::error!("Failed to write thumbnail for {}: {}", image_id, e);
                             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                             let _ = on_progress.send(ThumbnailProgress {
@@ -71,7 +65,6 @@ fn generate_thumbnails_blocking(
                             });
                             return None;
                         }
-                        webp_path
                     }
                     Err(e) => {
                         log::error!("Failed to extract thumbnail for {}: {}", image_id, e);
@@ -85,7 +78,7 @@ fn generate_thumbnails_blocking(
                         return None;
                     }
                 }
-            };
+            }
 
             let thumb_str = thumb_path.to_string_lossy().to_string();
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -115,25 +108,42 @@ pub async fn get_thumbnail(
         fs::create_dir_all(cache)
             .map_err(|e| format!("Failed to create cache dir: {}", e))?;
 
-        // See orientation note in generate_thumbnails for the `.v2.` suffix.
-        let webp_path = cache.join(format!("{}.v2.webp", image_id));
-        let jpg_path = cache.join(format!("{}.v2.jpg", image_id));
+        // See the `.v3.jpg` cache-key note in generate_thumbnails.
+        let thumb_path = cache.join(thumb_file_name(&image_id));
 
-        if webp_path.exists() {
-            return Ok(webp_path.to_string_lossy().to_string());
-        }
-        if jpg_path.exists() {
-            return Ok(jpg_path.to_string_lossy().to_string());
+        if thumb_path.exists() {
+            return Ok(thumb_path.to_string_lossy().to_string());
         }
 
         let raf = Path::new(&raf_path);
-        let webp_bytes = preview::extract_thumbnail(raf, THUMBNAIL_MAX_WIDTH)?;
+        let jpeg_bytes = preview::extract_thumbnail(raf, THUMBNAIL_MAX_WIDTH)?;
 
-        fs::write(&webp_path, &webp_bytes)
+        fs::write(&thumb_path, &jpeg_bytes)
             .map_err(|e| format!("Failed to write thumbnail: {}", e))?;
 
-        Ok(webp_path.to_string_lossy().to_string())
+        Ok(thumb_path.to_string_lossy().to_string())
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Cache file name for a thumbnail: `{id}.v3.jpg`.
+///
+/// The `.v3` generation marks lossy-JPEG thumbnails with EXIF orientation baked
+/// into the pixels. Both the RAF pipeline (here) and the sips/HEIF library
+/// pipeline write this exact name, so a single existence check per id decides
+/// hit vs. miss. Bumping the key invalidates the older `.v2` WebP/JPEG files.
+pub(crate) fn thumb_file_name(id: &str) -> String {
+    format!("{}.v3.jpg", id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumb_file_name_uses_v3_jpg_key() {
+        assert_eq!(thumb_file_name("DSCF1234"), "DSCF1234.v3.jpg");
+        assert_eq!(thumb_file_name("100_0001"), "100_0001.v3.jpg");
+    }
 }

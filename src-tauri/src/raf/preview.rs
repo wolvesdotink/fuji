@@ -1,4 +1,5 @@
 use byteorder::{BigEndian, ReadBytesExt};
+use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use std::fs::File;
@@ -52,12 +53,12 @@ pub fn extract_jpeg_from_raf(raf_path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// Extract and resize the embedded JPEG to a thumbnail.
-/// Returns WebP bytes of the resized thumbnail.
+/// Returns lossy JPEG bytes (quality 80) of the resized thumbnail.
 ///
 /// Applies EXIF orientation before resize/encode: Fuji cameras capture sensor
-/// data in landscape and mark portrait shots with an orientation tag. WebP
-/// encoding strips EXIF, so we must rotate pixels in-place — otherwise every
-/// portrait shot renders sideways in the gallery.
+/// data in landscape and mark portrait shots with an orientation tag. The
+/// re-encoded JPEG carries no EXIF tag, so we bake the rotation into the pixels
+/// here — otherwise every portrait shot renders sideways in the gallery.
 pub fn extract_thumbnail(raf_path: &Path, max_width: u32) -> Result<Vec<u8>, String> {
     let jpeg_data = extract_jpeg_from_raf(raf_path)?;
 
@@ -84,11 +85,13 @@ pub fn extract_thumbnail(raf_path: &Path, max_width: u32) -> Result<Vec<u8>, Str
         img
     };
 
-    // Encode to WebP
-    let mut output = Cursor::new(Vec::new());
-    resized
-        .write_to(&mut output, image::ImageFormat::WebP)
+    // Encode to lossy JPEG (quality 80). Pixels are already orientation-baked
+    // above, so the smaller JPEG both encodes faster than WebP and renders
+    // upright without any EXIF tag.
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 80)
+        .encode_image(&resized)
         .map_err(|e| format!("Failed to encode thumbnail: {}", e))?;
 
-    Ok(output.into_inner())
+    Ok(out)
 }
