@@ -508,7 +508,9 @@ export const useGalleryStore = defineStore("gallery", () => {
       const cacheDir = await join(home, ".cache", "fuji-culler", "ptp-preview");
       const fileName = ptpFileName(hifPath);
       const localPath = await ptpDownloadFile(cam.mount_path, fileName, cacheDir);
-      ptpPreviewCache.value = new Map(ptpPreviewCache.value.set(imageId, localPath));
+      // In-place .set — Vue tracks Map access per key, so only consumers of
+      // this imageId recompute (a full Map reassignment invalidates them all).
+      ptpPreviewCache.value.set(imageId, localPath);
       return localPath;
     })();
 
