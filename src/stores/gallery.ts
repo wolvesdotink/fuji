@@ -203,13 +203,15 @@ export const useGalleryStore = defineStore("gallery", () => {
         }
 
         // Populate thumbnail paths from the known cache naming convention
-        // The Swift bridge saves thumbnails as <stem>_thumb.jpg
+        // The Swift bridge saves thumbnails as <stem>_thumb.jpg. Plain string
+        // concat instead of `await join()` per image — the previous version
+        // did one sequential IPC round-trip per image, thousands of awaited
+        // hops on the main thread for a full card.
+        const ptpThumbPaths = new Map<string, string>();
         for (const img of images.value) {
-          const thumbPath = await join(cacheDir, `${img.id}_thumb.jpg`);
-          thumbnailPaths.value.set(img.id, thumbPath);
+          ptpThumbPaths.set(img.id, `${cacheDir}/${img.id}_thumb.jpg`);
         }
-        // Trigger reactivity
-        thumbnailPaths.value = new Map(thumbnailPaths.value);
+        thumbnailPaths.value = ptpThumbPaths;
       } else {
         // Mass storage: use filesystem listing (with persistent index)
         const home = await homeDir();
