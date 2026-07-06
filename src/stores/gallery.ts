@@ -72,6 +72,10 @@ export const useGalleryStore = defineStore("gallery", () => {
   // is purely presentational. When the user hides it, the import keeps going
   // and a floating pill (BackgroundActivityPill) offers the way back in.
   const importScreenVisible = ref(true);
+  // Set when a camera catalog finishes while the user is elsewhere (library
+  // mode), so the UI can offer a "photos ready" affordance instead of
+  // silently having loaded in the background.
+  const cameraLoadedNotice = ref(false);
 
   // View
   const viewMode = ref<"grid" | "single" | "compare">("single");
@@ -234,6 +238,12 @@ export const useGalleryStore = defineStore("gallery", () => {
       }
       ratings.value = new Map();
       currentIndex.value = 0;
+
+      // If the user navigated away while the catalog ran (back to library),
+      // surface a "photos ready" notice instead of loading silently.
+      if (images.value.length > 0 && useAppStore().appMode !== "camera") {
+        cameraLoadedNotice.value = true;
+      }
 
       // For mass-storage cameras, read camera-set ratings from HIF files and
       // generate RAF thumbnails. Kick off the ratings read first so it runs
@@ -581,6 +591,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     importStartedAt.value = null;
     importFinishedAt.value = null;
     importScreenVisible.value = true;
+    cameraLoadedNotice.value = false;
   }
 
   return {
@@ -603,6 +614,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     importStartedAt,
     importFinishedAt,
     importScreenVisible,
+    cameraLoadedNotice,
     importDestination,
     importError,
     viewMode,
