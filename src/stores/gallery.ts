@@ -213,10 +213,17 @@ export const useGalleryStore = defineStore("gallery", () => {
         }
         thumbnailPaths.value = ptpThumbPaths;
       } else {
-        // Mass storage: use filesystem listing (with persistent index)
+        // Mass storage: use filesystem listing (with persistent index).
+        // isCataloging drives the same "reading images" UI as PTP — a cold
+        // (uncached) card walk can take a while too.
         const home = await homeDir();
         const indexCacheDir = await join(home, ".cache", "fuji-culler");
-        images.value = await listImages(camera.value.dcim_path, indexCacheDir);
+        isCataloging.value = true;
+        try {
+          images.value = await listImages(camera.value.dcim_path, indexCacheDir);
+        } finally {
+          isCataloging.value = false;
+        }
       }
       ratings.value = new Map();
       currentIndex.value = 0;
