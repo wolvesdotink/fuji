@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -11,6 +12,12 @@ use crate::metadata;
 use crate::models::{ImportPhase, ImportProgress, ImportSelection, SelectionChoice};
 
 const COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB buffer
+
+/// Minimum interval between mid-copy progress messages. Chunk-level progress
+/// is only for the UI's progress bar — unthrottled it means one IPC message
+/// (deserialize + reactive update on the webview main thread) per 8MB chunk,
+/// thousands over a big import. File boundaries always emit regardless.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Copy selected files to the destination directory with progress reporting.
 ///
@@ -74,6 +81,7 @@ fn import_files_blocking(
 
     let files_total = files_to_copy.len() as u32;
     let mut bytes_copied: u64 = 0;
+    let mut last_progress = Instant::now();
 
     // Phase 1: Copy files to LaCie
     for (i, (source_path, dest_filename)) in files_to_copy.iter().enumerate() {
@@ -113,15 +121,29 @@ fn import_files_blocking(
 
             bytes_copied += bytes_read as u64;
 
-            let _ = on_progress.send(ImportProgress {
-                current_file: dest_filename.clone(),
-                files_completed: i as u32,
-                files_total,
-                bytes_copied,
-                bytes_total: total_bytes,
-                phase: ImportPhase::CopyingToLaCie,
-            });
+            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                last_progress = Instant::now();
+                let _ = on_progress.send(ImportProgress {
+                    current_file: dest_filename.clone(),
+                    files_completed: i as u32,
+                    files_total,
+                    bytes_copied,
+                    bytes_total: total_bytes,
+                    phase: ImportPhase::CopyingToLaCie,
+                });
+            }
         }
+
+        // File boundary: always emit so the files counter and bar never lag
+        // behind a completed file, even inside the throttle window.
+        let _ = on_progress.send(ImportProgress {
+            current_file: dest_filename.clone(),
+            files_completed: (i + 1) as u32,
+            files_total,
+            bytes_copied,
+            bytes_total: total_bytes,
+            phase: ImportPhase::CopyingToLaCie,
+        });
     }
 
     // Phase 1.5: Write XMP ratings to destination files
