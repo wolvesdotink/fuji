@@ -65,6 +65,13 @@ export const useGalleryStore = defineStore("gallery", () => {
   const importError = ref<string>("");
   // ms timestamp when the current import was kicked off — used for elapsed/ETA
   const importStartedAt = ref<number | null>(null);
+  // ms timestamp when the import reached a terminal state (complete/error).
+  // Freezes the elapsed clock even if the import screen is re-opened later.
+  const importFinishedAt = ref<number | null>(null);
+  // The import itself runs on a Rust worker thread — the full-screen overlay
+  // is purely presentational. When the user hides it, the import keeps going
+  // and a floating pill (BackgroundActivityPill) offers the way back in.
+  const importScreenVisible = ref(true);
 
   // View
   const viewMode = ref<"grid" | "single" | "compare">("single");
@@ -371,6 +378,8 @@ export const useGalleryStore = defineStore("gallery", () => {
     // paints on the next frame — no gap between click and visible feedback.
     importState.value = "preparing";
     importStartedAt.value = Date.now();
+    importFinishedAt.value = null;
+    importScreenVisible.value = true;
     importError.value = "";
     importProgress.value = null;
 
@@ -414,6 +423,8 @@ export const useGalleryStore = defineStore("gallery", () => {
       importState.value = "error";
       importError.value = String(e);
       console.error("Import failed:", e);
+    } finally {
+      importFinishedAt.value = Date.now();
     }
   }
 
@@ -568,6 +579,8 @@ export const useGalleryStore = defineStore("gallery", () => {
     importState.value = "idle";
     importProgress.value = null;
     importStartedAt.value = null;
+    importFinishedAt.value = null;
+    importScreenVisible.value = true;
   }
 
   return {
@@ -588,6 +601,8 @@ export const useGalleryStore = defineStore("gallery", () => {
     importState,
     importProgress,
     importStartedAt,
+    importFinishedAt,
+    importScreenVisible,
     importDestination,
     importError,
     viewMode,

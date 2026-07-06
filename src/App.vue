@@ -16,6 +16,7 @@ import LibraryHeader from "@/components/LibraryHeader.vue";
 import LibraryGrid from "@/components/LibraryGrid.vue";
 import LibraryViewer from "@/components/LibraryViewer.vue";
 import CameraImportPrompt from "@/components/CameraImportPrompt.vue";
+import BackgroundActivityPill from "@/components/BackgroundActivityPill.vue";
 
 const appStore = useAppStore();
 const galleryStore = useGalleryStore();
@@ -25,7 +26,12 @@ useKeyboardNav();
 const showCameraGallery = computed(
   () => galleryStore.camera !== null && galleryStore.images.length > 0
 );
-const showImport = computed(() => galleryStore.importState !== "idle");
+// The import overlay is presentational — the import itself runs on a Rust
+// worker thread. The user can hide the overlay (Esc / Hide) and keep using
+// the app; BackgroundActivityPill brings it back.
+const showImport = computed(
+  () => galleryStore.importState !== "idle" && galleryStore.importScreenVisible
+);
 const isLibraryMode = computed(() => appStore.appMode === "library");
 const isCameraMode = computed(() => appStore.appMode === "camera");
 const hasDestination = computed(() => !!appStore.destinationPath);
@@ -149,6 +155,10 @@ onUnmounted(() => {
     </template>
 
     <ImportProgress v-if="showImport" />
+
+    <!-- Floating status pill for background work (hidden import, camera
+         catalog). Guards its own visibility. -->
+    <BackgroundActivityPill />
 
     <!-- Camera detection prompt. Renders over any mode; guards its own
          visibility via appStore.shouldShowImportPrompt. -->

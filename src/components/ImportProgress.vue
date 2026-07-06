@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useGalleryStore } from "@/stores/gallery";
 import { useAppStore } from "@/stores/app";
 import { useLibraryStore } from "@/stores/library";
@@ -23,31 +23,22 @@ const skippedCount = computed(() => store.selectionSummary.skip);
 
 // --- Live clock for elapsed / ETA (ticks every 500ms while the screen is up)
 const now = ref(Date.now());
-const frozenAt = ref<number | null>(null);
 let tickHandle: number | undefined;
 onMounted(() => {
   tickHandle = window.setInterval(() => (now.value = Date.now()), 500);
+  window.addEventListener("keydown", handleEscape, true);
 });
-// Freeze the clock the moment we reach a terminal state so the elapsed
-// counter stops ticking while we wait for the user to press a button.
-watch(
-  () => store.importState,
-  (s) => {
-    if ((s === "complete" || s === "error") && tickHandle !== undefined) {
-      frozenAt.value = Date.now();
-      clearInterval(tickHandle);
-      tickHandle = undefined;
-    }
-  },
-);
 onUnmounted(() => {
   if (tickHandle !== undefined) clearInterval(tickHandle);
+  window.removeEventListener("keydown", handleEscape, true);
 });
 
+// The elapsed counter freezes on the store's terminal timestamp (not a local
+// one) so the value survives hiding and re-opening this screen mid/after import.
 const elapsedMs = computed(() => {
   const start = store.importStartedAt;
   if (!start) return 0;
-  return (frozenAt.value ?? now.value) - start;
+  return (store.importFinishedAt ?? now.value) - start;
 });
 
 const etaMs = computed<number | null>(() => {
@@ -182,6 +173,24 @@ function dismiss() {
 }
 
 const inFlight = computed(() => isPreparing.value || isImporting.value);
+
+/**
+ * Hide the overlay without touching the import — the copy runs on a Rust
+ * worker thread and keeps going. BackgroundActivityPill offers the way back.
+ */
+function hideScreen() {
+  store.importScreenVisible = false;
+}
+
+// Escape hides the screen while an import is in flight. Registered in the
+// capture phase with stopPropagation so useKeyboardNav's window listener
+// doesn't also act on the same keypress underneath the overlay.
+function handleEscape(e: KeyboardEvent) {
+  if (e.key !== "Escape" || !inFlight.value) return;
+  e.preventDefault();
+  e.stopPropagation();
+  hideScreen();
+}
 </script>
 
 <template>
@@ -193,6 +202,17 @@ const inFlight = computed(() => isPreparing.value || isImporting.value);
       'state-error': isError,
     }"
   >
+    <button
+      v-if="inFlight"
+      class="hide-button"
+      @click="hideScreen"
+      title="Hide — import continues in the background (Esc)"
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
+      <span>Hide</span>
+    </button>
     <div class="import-content">
       <!-- Aperture / iris -->
       <div class="aperture" :class="{ 'is-spinning': inFlight, 'is-success': isComplete, 'is-error': isError }">
@@ -303,6 +323,10 @@ const inFlight = computed(() => isPreparing.value || isImporting.value);
             Verify
           </span>
         </div>
+
+        <p class="background-hint">
+          Press <kbd>Esc</kbd> to keep using the app — the import continues in the background
+        </p>
       </template>
 
       <!-- Complete (pre-dismiss actions) -->
@@ -413,6 +437,53 @@ const inFlight = computed(() => isPreparing.value || isImporting.value);
   width: min(560px, 90vw);
   text-align: center;
   animation: content-rise 0.5s var(--ease-out) both;
+}
+
+.hide-button {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border-subtle);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.hide-button:hover {
+  border-color: var(--color-border-hover);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-hover);
+}
+
+.background-hint {
+  margin-top: 26px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.background-hint kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
 /* --- Aperture / iris --- */
