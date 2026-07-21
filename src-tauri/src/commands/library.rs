@@ -11,16 +11,16 @@ use walkdir::WalkDir;
 
 use crate::clip;
 use crate::clip::engine::ClipEngine;
-use crate::commands::thumbnails::thumb_file_name;
+use crate::commands::thumbnails::{generate_video_thumbnail, is_video_path, thumb_file_name};
 use crate::index;
 use crate::models::{
-    IndexFingerprint, IndexProgress, LibraryImage, ModelDownloadProgress, SearchResult,
+    IndexFingerprint, IndexProgress, LibraryImage, MediaType, ModelDownloadProgress, SearchResult,
     ThumbnailProgress,
 };
 
-/// List images from a destination/library directory.
+/// List photos and videos from a destination/library directory.
 /// Uses a persistent index with fingerprint-based change detection.
-/// Recursively walks for HIF, HEIF, HEIC, JPG, JPEG files.
+/// Recursively walks for supported still-image and movie files.
 /// Returns sorted by modification time descending (newest first).
 #[tauri::command]
 pub async fn list_library_images(
@@ -38,7 +38,9 @@ pub async fn list_library_images(
             .map_err(|e| format!("Failed to create cache dir: {}", e))?;
         let index_path = cache.join("library-index.json");
 
-        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
+        let extensions = &[
+            "HIF", "HEIF", "HEIC", "JPG", "JPEG", "MOV", "MP4", "M4V", "AVI",
+        ];
 
         // Fast path: only when a cached index already exists do we pay the cheap
         // fingerprint walk to validate it. On a match we skip the full scan,
@@ -90,22 +92,28 @@ fn scan_library_images(dir: &Path) -> Result<(Vec<LibraryImage>, IndexFingerprin
             .to_string_lossy()
             .to_uppercase();
 
-        match ext.as_str() {
-            "HIF" | "HEIF" | "HEIC" | "JPG" | "JPEG" => {}
+        let media_type = match ext.as_str() {
+            "HIF" | "HEIF" | "HEIC" | "JPG" | "JPEG" => MediaType::Image,
+            "MOV" | "MP4" | "M4V" | "AVI" => MediaType::Video,
             _ => continue,
-        }
-
-        let stem = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        };
 
         let file_name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+
+        let id = if media_type == MediaType::Video {
+            // Movie ids retain the extension to avoid colliding with a still
+            // bearing the same camera-generated stem.
+            file_name.clone()
+        } else {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        };
 
         let metadata = entry.metadata().ok();
         if let Some(m) = &metadata {
@@ -125,12 +133,13 @@ fn scan_library_images(dir: &Path) -> Result<(Vec<LibraryImage>, IndexFingerprin
             .unwrap_or(0);
 
         images.push(LibraryImage {
-            id: stem,
+            id,
             file_path: path.to_string_lossy().to_string(),
             file_name,
             file_size,
             date_created,
             date_modified,
+            media_type,
         });
     }
 
@@ -173,7 +182,16 @@ fn generate_library_thumbnails_blocking(
     let total = image_ids.len() as u32;
     let completed = AtomicU32::new(0);
 
-    let results: Vec<(String, String)> = image_ids
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().min(4))
+        .unwrap_or(2);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .map_err(|e| format!("Failed to create thumbnail worker pool: {}", e))?;
+
+    let results: Vec<(String, String)> = pool.install(|| {
+        image_ids
         .par_iter()
         .zip(image_paths.par_iter())
         .filter_map(|(image_id, image_path)| {
@@ -183,28 +201,34 @@ fn generate_library_thumbnails_blocking(
             let thumb_path = cache.join(thumb_file_name(image_id));
 
             if !thumb_path.exists() {
-                // One sips pass: decode HEIF/HIF, resize to 600px and write the
-                // final lossy JPEG (quality 80). sips preserves the EXIF
-                // orientation tag, so portrait shots stay upright in the webview.
-                let sips_result = Command::new("sips")
-                    .args([
-                        "-Z",
-                        "600",
-                        "-s",
-                        "format",
-                        "jpeg",
-                        "-s",
-                        "formatOptions",
-                        "80",
-                        image_path,
-                        "--out",
-                        &thumb_path.to_string_lossy(),
-                    ])
-                    .output();
+                let sips_result = if is_video_path(image_path) {
+                    generate_video_thumbnail(image_path, &thumb_path, 600).map(|_| None)
+                } else {
+                    // One sips pass: decode HEIF/HIF, resize to 600px and write
+                    // the final lossy JPEG (quality 80). Orientation is baked in.
+                    Command::new("sips")
+                        .args([
+                            "-Z",
+                            "600",
+                            "-s",
+                            "format",
+                            "jpeg",
+                            "-s",
+                            "formatOptions",
+                            "80",
+                            image_path,
+                            "--out",
+                            &thumb_path.to_string_lossy(),
+                        ])
+                        .output()
+                        .map(Some)
+                        .map_err(|e| format!("Failed to run sips: {}", e))
+                };
 
                 match sips_result {
-                    Ok(result) if result.status.success() => {}
-                    Ok(result) => {
+                    Ok(None) => {}
+                    Ok(Some(result)) if result.status.success() => {}
+                    Ok(Some(result)) => {
                         let stderr = String::from_utf8_lossy(&result.stderr);
                         log::error!("sips failed for {}: {}", image_id, stderr);
                         // Remove any partial output sips may have left behind.
@@ -219,7 +243,7 @@ fn generate_library_thumbnails_blocking(
                         return None;
                     }
                     Err(e) => {
-                        log::error!("Failed to run sips for {}: {}", image_id, e);
+                        log::error!("Failed to generate thumbnail for {}: {}", image_id, e);
                         let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                         let _ = on_progress.send(ThumbnailProgress {
                             image_id: image_id.clone(),
@@ -243,7 +267,8 @@ fn generate_library_thumbnails_blocking(
 
             Some((image_id.clone(), thumb_str))
         })
-        .collect();
+        .collect()
+    });
 
     Ok(results)
 }
@@ -326,15 +351,21 @@ mod tests {
         let sub = dir.join("sub"); // library walk is unbounded depth
         fs::create_dir_all(&sub).unwrap();
         write_file(&sub, "d.heic", b"dddddd"); // 6, nested + lowercase
+        write_file(&sub, "clip.MOV", b"movie"); // 5, nested video
 
-        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
+        let extensions = &[
+            "HIF", "HEIF", "HEIC", "JPG", "JPEG", "MOV", "MP4", "M4V", "AVI",
+        ];
         let expected = index::compute_fingerprint(&dir, extensions, None).unwrap();
         let (images, folded) = scan_library_images(&dir).unwrap();
 
         assert_eq!(folded, expected);
-        assert_eq!(folded.file_count, 4);
-        assert_eq!(folded.total_bytes, 20);
-        assert_eq!(images.len(), 4);
+        assert_eq!(folded.file_count, 5);
+        assert_eq!(folded.total_bytes, 25);
+        assert_eq!(images.len(), 5);
+        let movie = images.iter().find(|item| item.file_name == "clip.MOV").unwrap();
+        assert_eq!(movie.media_type, MediaType::Video);
+        assert_eq!(movie.id, "clip.MOV");
 
         fs::remove_dir_all(&dir).ok();
     }

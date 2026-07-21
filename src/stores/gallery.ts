@@ -91,8 +91,12 @@ export const useGalleryStore = defineStore("gallery", () => {
   );
 
   // Derive selection from rating
-  function selectionFromRating(rating: number): SelectionChoice {
+  function selectionFromRating(
+    rating: number,
+    mediaType: ImagePair["media_type"] = "Image"
+  ): SelectionChoice {
     if (rating === 0) return "Skip";
+    if (mediaType === "Video") return "HeifOnly";
     if (rating <= 3) return "HeifOnly";
     return "HeifAndRaw";
   }
@@ -220,7 +224,9 @@ export const useGalleryStore = defineStore("gallery", () => {
         // hops on the main thread for a full card.
         const ptpThumbPaths = new Map<string, string>();
         for (const img of images.value) {
-          ptpThumbPaths.set(img.id, `${cacheDir}/${img.id}_thumb.jpg`);
+          if (img.thumbnail_path) {
+            ptpThumbPaths.set(img.id, img.thumbnail_path);
+          }
         }
         thumbnailPaths.value = ptpThumbPaths;
       } else {
@@ -253,10 +259,13 @@ export const useGalleryStore = defineStore("gallery", () => {
         const home = await homeDir();
         const ratingsCacheDir = await join(home, ".cache", "fuji-culler");
         const hifPaths = images.value.map((img) => img.hif_path);
+        const idByStem = new Map(
+          images.value.map((img) => [ptpFileName(img.hif_path).replace(/\.[^.]+$/, ""), img.id])
+        );
         readFileRatings(hifPaths, ratingsCacheDir)
           .then((fileRatings) => {
             for (const [stem, rating] of Object.entries(fileRatings)) {
-              ratings.value.set(stem, rating);
+              ratings.value.set(idByStem.get(stem) ?? stem, rating);
             }
           })
           .catch((e) => console.error("Failed to read camera ratings:", e));
@@ -275,11 +284,13 @@ export const useGalleryStore = defineStore("gallery", () => {
   async function loadThumbnails() {
     if (!camera.value || images.value.length === 0) return;
 
-    const imagesWithRaf = images.value.filter((img) => img.raf_path);
-    if (imagesWithRaf.length === 0) return;
+    const mediaNeedingThumbs = images.value.filter(
+      (img) => img.raf_path || img.media_type === "Video"
+    );
+    if (mediaNeedingThumbs.length === 0) return;
 
     isLoadingThumbnails.value = true;
-    thumbnailProgress.value = { completed: 0, total: imagesWithRaf.length };
+    thumbnailProgress.value = { completed: 0, total: mediaNeedingThumbs.length };
 
     const home = await homeDir();
     const cacheDir = await join(home, ".cache", "fuji-culler", "thumbs");
@@ -287,11 +298,13 @@ export const useGalleryStore = defineStore("gallery", () => {
     try {
       await generateThumbnails(
         camera.value.dcim_path,
-        imagesWithRaf.map((img) => img.id),
-        imagesWithRaf.map((img) => img.raf_path!),
+        mediaNeedingThumbs.map((img) => img.id),
+        mediaNeedingThumbs.map((img) => img.raf_path ?? img.hif_path),
         cacheDir,
         (progress) => {
-          thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+          if (progress.thumbnail_path) {
+            thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+          }
           thumbnailProgress.value = {
             completed: progress.completed,
             total: progress.total,
@@ -361,6 +374,7 @@ export const useGalleryStore = defineStore("gallery", () => {
    * the whole collection.
    */
   function toggleMarkForCompare(imageId: string) {
+    if (imageById.value.get(imageId)?.media_type === "Video") return;
     const next = new Set(markedForCompare.value);
     if (next.has(imageId)) {
       next.delete(imageId);
@@ -402,7 +416,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         const rating = ratings.value.get(img.id)!;
         return {
           image_id: img.id,
-          choice: selectionFromRating(rating),
+          choice: selectionFromRating(rating, img.media_type),
           hif_path: img.hif_path,
           raf_path: img.raf_path,
           rating,
@@ -448,7 +462,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         const rating = ratings.value.get(img.id)!;
         return {
           image_id: img.id,
-          choice: selectionFromRating(rating),
+          choice: selectionFromRating(rating, img.media_type),
           hif_path: img.hif_path,
           raf_path: img.raf_path,
           rating,

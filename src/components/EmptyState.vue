@@ -124,8 +124,8 @@ async function pickFolder() {
       <h1 class="title">FUJI CULLER</h1>
 
       <template v-if="isLibraryMode">
-        <p class="subtitle">Choose a folder to view your photo library</p>
-        <p class="hint">Select the folder where your imported photos are stored</p>
+        <p class="subtitle">Choose a folder to view your media library</p>
+        <p class="hint">Select the folder where your imported photos and videos are stored</p>
 
         <button class="action-button" @click="pickFolder">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -152,7 +152,7 @@ async function pickFolder() {
           >
             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
           </svg>
-          <span>Reading images from camera</span>
+          <span>Reading media from camera</span>
         </div>
 
         <div v-if="canReturnToLibrary" class="back-to-library-row">

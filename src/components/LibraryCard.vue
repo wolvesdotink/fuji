@@ -54,10 +54,16 @@ function openInViewer(e: MouseEvent) {
     store.viewMode = "single";
   }, container);
 }
+
+function onMouseEnter() {
+  if (props.image.media_type === "Image") {
+    startPreload(props.image.file_path);
+  }
+}
 </script>
 
 <template>
-  <div class="library-card" @click="openInViewer" @mouseenter="startPreload(image.file_path)" @mouseleave="cancelPreload">
+  <div class="library-card" @click="openInViewer" @mouseenter="onMouseEnter" @mouseleave="cancelPreload">
     <div class="thumbnail-container" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
       <!-- Shimmer skeleton while thumbnail generates -->
       <div v-if="!hasThumbnail" class="thumbnail-skeleton">
@@ -72,6 +78,13 @@ function openInViewer(e: MouseEvent) {
         class="thumbnail"
         loading="lazy"
       />
+
+      <div v-if="image.media_type === 'Video'" class="video-badge" title="Video">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+        Video
+      </div>
 
       <!-- Hover overlay -->
       <div class="hover-overlay" v-if="hasThumbnail">
@@ -128,6 +141,25 @@ function openInViewer(e: MouseEvent) {
   object-fit: cover;
   transition: transform var(--transition-slow);
   animation: thumb-fade-in 0.3s ease both;
+}
+
+.video-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(5, 5, 4, 0.78);
+  color: white;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  backdrop-filter: blur(4px);
 }
 
 /* Skeleton shimmer placeholder */

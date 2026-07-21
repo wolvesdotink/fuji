@@ -8,7 +8,18 @@ use walkdir::WalkDir;
 
 use crate::camera::ptp;
 use crate::index;
-use crate::models::{CameraSourceType, CameraVolume, ImagePair, IndexFingerprint};
+use crate::models::{CameraSourceType, CameraVolume, ImagePair, IndexFingerprint, MediaType};
+
+const IMAGE_EXTENSIONS: &[&str] = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
+const VIDEO_EXTENSIONS: &[&str] = &["MOV", "MP4", "M4V", "AVI"];
+
+fn is_image_extension(ext: &str) -> bool {
+    IMAGE_EXTENSIONS.contains(&ext)
+}
+
+fn is_video_extension(ext: &str) -> bool {
+    VIDEO_EXTENSIONS.contains(&ext)
+}
 
 /// One /Volumes entry + whether it looks like a camera (has DCIM).
 #[derive(Debug, Serialize)]
@@ -59,7 +70,7 @@ pub fn scan_volumes_for_cameras() -> Result<Vec<CameraVolume>, String> {
 
                 let subdir_name = dcim_entry.file_name().to_string_lossy().to_uppercase();
 
-                // Check if it's a Fuji folder or contains supported image files
+                // Check if it's a Fuji folder or contains supported media files
                 let is_fuji_folder = subdir_name.contains("FUJI");
                 let has_fuji_files = if !is_fuji_folder {
                     fs::read_dir(&subdir)
@@ -72,6 +83,10 @@ pub fn scan_volumes_for_cameras() -> Result<Vec<CameraVolume>, String> {
                                     || name.ends_with(".JPG")
                                     || name.ends_with(".JPEG")
                                     || name.ends_with(".RAF")
+                                    || name.ends_with(".MOV")
+                                    || name.ends_with(".MP4")
+                                    || name.ends_with(".M4V")
+                                    || name.ends_with(".AVI")
                             })
                         })
                         .unwrap_or(false)
@@ -217,6 +232,7 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFin
         std::collections::HashMap::new();
     let mut raf_files: std::collections::HashMap<String, (String, u64)> =
         std::collections::HashMap::new();
+    let mut video_files: Vec<(String, String, u64)> = Vec::new();
     let mut fingerprint = index::FingerprintAccumulator::default();
 
     for entry in WalkDir::new(dcim)
@@ -246,7 +262,7 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFin
         let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
 
         match ext.as_str() {
-            "HIF" | "HEIF" | "HEIC" | "JPG" | "JPEG" => {
+            ext if is_image_extension(ext) => {
                 if let Some(m) = &metadata {
                     fingerprint.add(m);
                 }
@@ -257,6 +273,24 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFin
                     fingerprint.add(m);
                 }
                 raf_files.insert(stem, (path.to_string_lossy().to_string(), size));
+            }
+            ext if is_video_extension(ext) => {
+                if let Some(m) = &metadata {
+                    fingerprint.add(m);
+                }
+                let file_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                // Keep the extension in video ids. This avoids collisions when
+                // a camera contains a still and movie with the same stem and
+                // also gives thumbnail caches a stable, unique key.
+                video_files.push((
+                    file_name,
+                    path.to_string_lossy().to_string(),
+                    size,
+                ));
             }
             _ => {}
         }
@@ -277,9 +311,21 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFin
                 raf_path,
                 hif_size,
                 raf_size,
+                media_type: MediaType::Image,
+                thumbnail_path: None,
             }
         })
         .collect();
+
+    pairs.extend(video_files.into_iter().map(|(id, path, size)| ImagePair {
+        id,
+        hif_path: path,
+        raf_path: None,
+        hif_size: size,
+        raf_size: None,
+        media_type: MediaType::Video,
+        thumbnail_path: None,
+    }));
 
     // Also include any RAF files without a matching HIF
     for (stem, (_raf_path, _raf_size)) in raf_files {
@@ -305,6 +351,7 @@ fn list_images_ptp(
         std::collections::HashMap::new();
     let mut raf_files: std::collections::HashMap<String, (String, u64)> =
         std::collections::HashMap::new();
+    let mut videos: Vec<ImagePair> = Vec::new();
 
     for file in &catalog.files {
         let name_upper = file.name.to_uppercase();
@@ -314,18 +361,34 @@ fn list_images_ptp(
             .to_string_lossy()
             .to_string();
 
-        if name_upper.ends_with(".HIF") || name_upper.ends_with(".HEIF") || name_upper.ends_with(".HEIC") || name_upper.ends_with(".JPG") || name_upper.ends_with(".JPEG") {
+        let extension = Path::new(&file.name)
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_uppercase();
+
+        if is_image_extension(&extension) {
             let ptp_path = ptp::make_ptp_path(camera_name, &file.name);
             hif_files.insert(stem, (ptp_path, file.size.max(0) as u64, file.thumbnail.clone()));
         } else if name_upper.ends_with(".RAF") {
             let ptp_path = ptp::make_ptp_path(camera_name, &file.name);
             raf_files.insert(stem, (ptp_path, file.size.max(0) as u64));
+        } else if is_video_extension(&extension) {
+            videos.push(ImagePair {
+                id: file.name.clone(),
+                hif_path: ptp::make_ptp_path(camera_name, &file.name),
+                raf_path: None,
+                hif_size: file.size.max(0) as u64,
+                raf_size: None,
+                media_type: MediaType::Video,
+                thumbnail_path: file.thumbnail.clone(),
+            });
         }
     }
 
     let mut pairs: Vec<ImagePair> = hif_files
         .into_iter()
-        .map(|(stem, (hif_path, hif_size, _thumbnail))| {
+        .map(|(stem, (hif_path, hif_size, thumbnail_path))| {
             let (raf_path, raf_size) = raf_files
                 .remove(&stem)
                 .map(|(p, s)| (Some(p), Some(s)))
@@ -337,9 +400,13 @@ fn list_images_ptp(
                 raf_path,
                 hif_size,
                 raf_size,
+                media_type: MediaType::Image,
+                thumbnail_path,
             }
         })
         .collect();
+
+    pairs.extend(videos);
 
     pairs.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -355,7 +422,9 @@ pub async fn list_images(dcim_path: String, cache_dir: String) -> Result<Vec<Ima
         let index_path = cache.join("camera-index.json");
 
         let dcim = Path::new(&dcim_path);
-        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG", "RAF"];
+        let extensions = &[
+            "HIF", "HEIF", "HEIC", "JPG", "JPEG", "RAF", "MOV", "MP4", "M4V", "AVI",
+        ];
 
         // Fast path: only when a cached index already exists do we pay the cheap
         // fingerprint walk to validate it. On a match we skip the full scan,
@@ -437,7 +506,18 @@ pub async fn ptp_delete_files(
         let result = bridge.delete(&camera_name, &file_names)?;
 
         if !result.errors.is_empty() {
-            log::warn!("PTP delete errors: {:?}", result.errors);
+            return Err(format!(
+                "Camera did not delete the requested files: {}",
+                result.errors.join("; ")
+            ));
+        }
+
+        if result.deleted != file_names.len() as u32 {
+            return Err(format!(
+                "Camera confirmed deletion of {} out of {} files",
+                result.deleted,
+                file_names.len()
+            ));
         }
 
         Ok(result.deleted)
@@ -477,19 +557,25 @@ mod tests {
         write_file(&sub, "IMG_0001.HIF", b"hhhh"); // 4
         write_file(&sub, "IMG_0001.RAF", b"rrrrrr"); // 6, same stem as the HIF
         write_file(&sub, "IMG_0002.JPG", b"jj"); // 2
+        write_file(&sub, "IMG_0003.MOV", b"movie"); // 5
         write_file(&sub, "note.txt", b"x"); // excluded extension
         let deep = sub.join("deeper"); // depth 2 dir → its files are depth 3
         fs::create_dir_all(&deep).unwrap();
         write_file(&deep, "IMG_9999.HIF", b"zzzzzzzz"); // excluded by max_depth 2
 
-        let extensions = &["HIF", "HEIF", "HEIC", "JPG", "JPEG", "RAF"];
+        let extensions = &[
+            "HIF", "HEIF", "HEIC", "JPG", "JPEG", "RAF", "MOV", "MP4", "M4V", "AVI",
+        ];
         let expected = index::compute_fingerprint(&dir, extensions, Some(2)).unwrap();
         let (pairs, folded) = list_images_mass_storage(dir.to_str().unwrap()).unwrap();
 
         assert_eq!(folded, expected);
-        assert_eq!(folded.file_count, 3); // HIF + RAF + JPG at depth 2
-        assert_eq!(folded.total_bytes, 12);
-        assert_eq!(pairs.len(), 2); // IMG_0001 (HIF+RAF) and IMG_0002 (JPG only)
+        assert_eq!(folded.file_count, 4); // HIF + RAF + JPG + MOV at depth 2
+        assert_eq!(folded.total_bytes, 17);
+        assert_eq!(pairs.len(), 3);
+        let movie = pairs.iter().find(|item| item.id == "IMG_0003.MOV").unwrap();
+        assert_eq!(movie.media_type, MediaType::Video);
+        assert!(movie.raf_path.is_none());
 
         fs::remove_dir_all(&dir).ok();
     }

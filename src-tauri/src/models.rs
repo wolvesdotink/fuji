@@ -14,6 +14,13 @@ pub struct CameraVolume {
     pub source_type: CameraSourceType,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaType {
+    #[default]
+    Image,
+    Video,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImagePair {
     pub id: String,
@@ -21,6 +28,10 @@ pub struct ImagePair {
     pub raf_path: Option<String>,
     pub hif_size: u64,
     pub raf_size: Option<u64>,
+    #[serde(default)]
+    pub media_type: MediaType,
+    #[serde(default)]
+    pub thumbnail_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +102,8 @@ pub struct LibraryImage {
     pub file_size: u64,
     pub date_created: u64,
     pub date_modified: u64,
+    #[serde(default)]
+    pub media_type: MediaType,
 }
 
 // --- CLIP Search ---

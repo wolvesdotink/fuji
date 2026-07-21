@@ -39,6 +39,8 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
     // Session state
     var sessionOpened = false
     var sessionError: Error?
+    var sessionCloseDone = false
+    var sessionCloseError: Error?
 
     // Catalog state
     var catalogDone = false
@@ -166,7 +168,47 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         return catalogDone
     }
 
+    /// Closing an ImageCaptureCore session is asynchronous. Daemon commands
+    /// must wait for it before replying, otherwise a delete issued immediately
+    /// after an import races the prior download session's close and is ignored
+    /// by some Fuji bodies.
+    func closeSession(camera: ICCameraDevice, timeout: TimeInterval = 10.0) -> Bool {
+        sessionCloseDone = false
+        sessionCloseError = nil
+        camera.requestCloseSession()
+
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while !sessionCloseDone && Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        }
+
+        if !sessionCloseDone {
+            stderrLog("Session close timed out")
+            return false
+        }
+        if let error = sessionCloseError {
+            stderrLog("Session close error: \(error.localizedDescription)")
+            return false
+        }
+        return true
+    }
+
     // MARK: - Thumbnail Requests
+
+    func isPreviewableMedia(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension.uppercased()
+        return ["HIF", "HEIF", "HEIC", "JPG", "JPEG", "MOV", "MP4", "M4V", "AVI"].contains(ext)
+    }
+
+    func thumbnailCacheId(_ name: String) -> String {
+        let ext = (name as NSString).pathExtension.uppercased()
+        // Movie ids include their extension on the Rust/TypeScript side so a
+        // still and movie with the same stem cannot overwrite each other.
+        if ["MOV", "MP4", "M4V", "AVI"].contains(ext) {
+            return name
+        }
+        return (name as NSString).deletingPathExtension
+    }
 
     func requestAllThumbnails(camera: ICCameraDevice, items: [ICCameraItem], timeout: TimeInterval = 120.0) {
         thumbnailResults = [:]
@@ -211,7 +253,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
     // MARK: - File Delete
 
-    func deleteFiles(camera: ICCameraDevice, files: [ICCameraItem], timeout: TimeInterval = 60.0) -> Error? {
+    func deleteFiles(camera: ICCameraDevice, files: [ICCameraItem], timeout: TimeInterval = 60.0) -> String? {
         deleteDone = false
         deleteError = nil
 
@@ -222,7 +264,13 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
         }
 
-        return deleteError
+        // The old implementation returned nil here even when the delegate
+        // callback never arrived, causing the UI to announce a successful
+        // deletion while every file remained on the card.
+        if !deleteDone {
+            return "Timed out waiting for the camera to confirm deletion"
+        }
+        return deleteError?.localizedDescription
     }
 
     // MARK: - ICDeviceBrowserDelegate
@@ -269,7 +317,10 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         }
     }
 
-    func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {}
+    func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
+        sessionCloseError = error
+        sessionCloseDone = true
+    }
 
     func didRemove(_ device: ICDevice) {}
 
@@ -356,7 +407,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         guard waitForCatalog(camera: camera) else {
             printError("Content cataloging timed out")
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             stopBrowsing()
             return
         }
@@ -370,7 +421,12 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         try? FileManager.default.createDirectory(at: thumbURL, withIntermediateDirectories: true)
 
         // Request thumbnails for all files
-        let allItems = mediaFiles.map { $0 as ICCameraItem }
+        // RAF files share a stem with their rendered still and do not need a
+        // duplicate thumbnail request. Avoiding them also cuts catalog IPC and
+        // cache writes substantially on RAW+HEIF cards.
+        let allItems = mediaFiles
+            .filter { isPreviewableMedia($0.name ?? "") }
+            .map { $0 as ICCameraItem }
         if !allItems.isEmpty {
             stderrLog("Requesting \(allItems.count) thumbnails...")
             requestAllThumbnails(camera: camera, items: allItems)
@@ -381,7 +437,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         var files: [[String: Any]] = []
         for file in mediaFiles {
             let name = file.name ?? ""
-            let stem = (name as NSString).deletingPathExtension
+            let cacheId = thumbnailCacheId(name)
             var entry: [String: Any] = [
                 "name": name,
                 "size": file.fileSize,
@@ -391,7 +447,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
             // Save thumbnail if we got one
             if let cgImage = thumbnailResults[name] {
-                let thumbPath = thumbURL.appendingPathComponent("\(stem)_thumb.jpg")
+                let thumbPath = thumbURL.appendingPathComponent("\(cacheId)_thumb.jpg")
                 if saveCGImageAsJPEG(cgImage, to: thumbPath) {
                     entry["thumbnail"] = thumbPath.path
                 }
@@ -400,7 +456,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             files.append(entry)
         }
 
-        camera.requestCloseSession()
+        _ = closeSession(camera: camera)
         stopBrowsing()
 
         let result: [String: Any] = [
@@ -425,7 +481,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         guard waitForCatalog(camera: camera) else {
             printError("Content cataloging timed out")
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             stopBrowsing()
             return
         }
@@ -453,7 +509,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             }
         }
 
-        camera.requestCloseSession()
+        _ = closeSession(camera: camera)
         stopBrowsing()
 
         let result: [String: Any] = [
@@ -478,7 +534,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         guard waitForCatalog(camera: camera) else {
             printError("Content cataloging timed out")
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             stopBrowsing()
             return
         }
@@ -488,7 +544,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         let filesToDelete = mediaFiles.filter { fileNameSet.contains($0.name ?? "") }
 
         if filesToDelete.isEmpty {
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             stopBrowsing()
             let result: [String: Any] = ["deleted": 0, "errors": ["No matching files found"]]
             printJSON(result)
@@ -497,12 +553,13 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         stderrLog("Deleting \(filesToDelete.count) files...")
         let error = deleteFiles(camera: camera, files: filesToDelete.map { $0 as ICCameraItem })
-        camera.requestCloseSession()
+        _ = closeSession(camera: camera)
         stopBrowsing()
 
         var result: [String: Any] = ["deleted": filesToDelete.count]
         if let error = error {
-            result["errors"] = [error.localizedDescription]
+            result["deleted"] = 0
+            result["errors"] = [error]
         } else {
             result["errors"] = [String]()
         }
@@ -706,7 +763,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         guard waitForCatalog(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Content cataloging timed out")
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             return
         }
 
@@ -716,7 +773,9 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         let thumbURL = URL(fileURLWithPath: thumbDir)
         try? FileManager.default.createDirectory(at: thumbURL, withIntermediateDirectories: true)
 
-        let allItems = mediaFiles.map { $0 as ICCameraItem }
+        let allItems = mediaFiles
+            .filter { isPreviewableMedia($0.name ?? "") }
+            .map { $0 as ICCameraItem }
         if !allItems.isEmpty {
             stderrLog("Daemon: Requesting \(allItems.count) thumbnails...")
             requestAllThumbnails(camera: camera, items: allItems)
@@ -726,7 +785,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         var files: [[String: Any]] = []
         for file in mediaFiles {
             let name = file.name ?? ""
-            let stem = (name as NSString).deletingPathExtension
+            let cacheId = thumbnailCacheId(name)
             var entry: [String: Any] = [
                 "name": name,
                 "size": file.fileSize,
@@ -735,7 +794,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             ]
 
             if let cgImage = thumbnailResults[name] {
-                let thumbPath = thumbURL.appendingPathComponent("\(stem)_thumb.jpg")
+                let thumbPath = thumbURL.appendingPathComponent("\(cacheId)_thumb.jpg")
                 if saveCGImageAsJPEG(cgImage, to: thumbPath) {
                     entry["thumbnail"] = thumbPath.path
                 }
@@ -744,7 +803,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             files.append(entry)
         }
 
-        camera.requestCloseSession()
+        _ = closeSession(camera: camera)
         // NOTE: do NOT call stopBrowsing() — the daemon keeps the browser alive
         // across requests so the next catalog/download doesn't have to
         // rediscover the camera.
@@ -771,7 +830,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         guard waitForCatalog(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Content cataloging timed out")
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             return
         }
 
@@ -809,7 +868,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             )
         }
 
-        camera.requestCloseSession()
+        _ = closeSession(camera: camera)
 
         let result: [String: Any] = [
             "downloaded": downloaded,
@@ -833,7 +892,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         guard waitForCatalog(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Content cataloging timed out")
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             return
         }
 
@@ -842,7 +901,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         let filesToDelete = mediaFiles.filter { fileNameSet.contains($0.name ?? "") }
 
         if filesToDelete.isEmpty {
-            camera.requestCloseSession()
+            _ = closeSession(camera: camera)
             let result: [String: Any] = ["deleted": 0, "errors": ["No matching files found"]]
             writeDaemonResponse(id: id, ok: true, result: result)
             return
@@ -850,11 +909,12 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         stderrLog("Daemon: Deleting \(filesToDelete.count) files...")
         let error = deleteFiles(camera: camera, files: filesToDelete.map { $0 as ICCameraItem })
-        camera.requestCloseSession()
+        _ = closeSession(camera: camera)
 
         var result: [String: Any] = ["deleted": filesToDelete.count]
         if let error = error {
-            result["errors"] = [error.localizedDescription]
+            result["deleted"] = 0
+            result["errors"] = [error]
         } else {
             result["errors"] = [String]()
         }

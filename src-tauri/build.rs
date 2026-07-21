@@ -1,5 +1,4 @@
 use std::env;
-use std::path::Path;
 use std::process::Command;
 
 fn main() {
@@ -13,24 +12,10 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", swift_src);
 
-    // Only compile if the source is newer than the binary
-    let should_compile = if Path::new(&out_binary).exists() {
-        let src_modified = std::fs::metadata(swift_src)
-            .and_then(|m| m.modified())
-            .ok();
-        let bin_modified = std::fs::metadata(&out_binary)
-            .and_then(|m| m.modified())
-            .ok();
-
-        match (src_modified, bin_modified) {
-            (Some(src), Some(bin)) => src > bin,
-            _ => true,
-        }
-    } else {
-        true
-    };
-
-    if should_compile {
+    // Always compile the bridge for Apple targets. Git checkouts do not
+    // preserve source mtimes, so the previous source-newer-than-binary check
+    // could silently bundle a stale checked-in bridge after Swift changes.
+    if target.contains("apple-darwin") {
         // Ensure binaries directory exists
         std::fs::create_dir_all("binaries").expect("Failed to create binaries directory");
 
