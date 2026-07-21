@@ -176,8 +176,11 @@ export const useLibraryStore = defineStore("library", () => {
             // images.value.find() per returned rating was O(n) each, i.e.
             // O(n^2) across a full library of camera-set ratings.
             const imageById = new Map(images.value.map((i) => [i.id, i]));
+            const imageByStem = new Map(
+              images.value.map((i) => [i.file_name.replace(/\.[^.]+$/, ""), i])
+            );
             for (const [stem, rating] of Object.entries(fileRatings)) {
-              const img = imageById.get(stem);
+              const img = imageById.get(stem) ?? imageByStem.get(stem);
               if (img) {
                 ratings.value.set(img.file_path, rating);
               }
@@ -219,7 +222,9 @@ export const useLibraryStore = defineStore("library", () => {
           // recomputes. Reassigning `new Map(...)` here invalidated every
           // card's thumbnail lookup on each thumbnail, an O(n) storm per
           // file → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
-          thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+          if (progress.thumbnail_path) {
+            thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+          }
           thumbnailProgress.value = {
             completed: progress.completed,
             total: progress.total,

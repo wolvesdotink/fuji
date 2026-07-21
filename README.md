@@ -4,7 +4,7 @@
 
 # Fuji Culler
 
-A fast, focused desktop app for culling and importing photos from Fuji cameras. Connect your camera, rate your keepers, and import — all without leaving the app.
+A fast, focused desktop app for culling and importing photos and videos from Fuji cameras. Connect your camera, rate your keepers, and import — all without leaving the app.
 
 - **Project website:** [wolves.ink/projects/fuji](https://wolves.ink/projects/fuji)
 - **Wolves:** [wolves.ink](https://wolves.ink)
@@ -27,13 +27,14 @@ The app is signed and notarized, so macOS will open it without warnings on first
 - **Auto-detection** — Plug in your Fuji camera (USB mass storage or PTP) and Fuji Culler detects it instantly
 - **Star-based culling** — Rate photos 1–5 with a single keypress; ratings auto-advance to the next unreviewed image
 - **Smart import logic** — Ratings 1–3 import HEIF only; ratings 4–5 import both HEIF and the original RAW (.RAF) file
+- **Video import and playback** — Import MOV, MP4, M4V, and AVI clips, then browse, rate, search, and play them in the library
 - **Respects camera ratings** — Reads star ratings already set on-camera from HIF XMP metadata
 - **Side-by-side compare** — Mark two or more images with `M` and open them in compare view with `C` to pick the best shot
 - **PTP support** — Fully supports Fuji cameras connected via PTP (not just mass storage), including catalog, preview download, and delete after import
 - **Delete after import** — Remove imported or skipped files from the camera card after a session
 
 ### Library Browser
-- **Browse imported photos** — View and re-rate any folder of previously imported images
+- **Browse imported media** — View and re-rate any folder of previously imported photos and videos
 - **Sort by date or stars** — Multiple sort orders to find photos quickly
 - **AI-powered semantic search** — Type natural language queries like "golden hour landscape" or "portrait with bokeh" and find matching photos using a local CLIP model (no internet required after first download)
 - **CLIP index** — Automatically built in the background after each library load; the model runs entirely on-device

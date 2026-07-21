@@ -53,7 +53,9 @@ watch(
     for (const offset of [-1, 1, 2]) {
       const adjIdx = newIdx + offset;
       if (adjIdx >= 0 && adjIdx < imgs.length) {
-        decodeAhead(fileUrl(imgs[adjIdx].file_path));
+        if (imgs[adjIdx].media_type === "Image") {
+          decodeAhead(fileUrl(imgs[adjIdx].file_path));
+        }
       }
     }
   },
@@ -125,9 +127,19 @@ function onRating(r: number) {
         :key="'thumb-' + image.id"
       />
 
+      <video
+        v-if="image.media_type === 'Video'"
+        :src="imageSrc"
+        :poster="thumbnailSrc || undefined"
+        :key="'video-' + image.id"
+        class="full-video"
+        controls
+        preload="metadata"
+      />
+
       <!-- Full-res image (fades in over thumbnail) -->
       <img
-        v-if="imageSrc"
+        v-else-if="imageSrc"
         :src="imageSrc"
         :alt="image.id"
         :class="['full-image', { loaded: fullResLoaded }]"
@@ -217,6 +229,14 @@ function onRating(r: number) {
 
 .full-image.loaded {
   opacity: 1;
+}
+
+.full-video {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .vignette {

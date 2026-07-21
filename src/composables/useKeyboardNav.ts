@@ -11,6 +11,12 @@ export function useKeyboardNav() {
   const { startTransition } = useViewTransition();
 
   function handleKeydown(e: KeyboardEvent) {
+    // Let native video controls own Space and arrow keys for play/pause and
+    // seeking. Escape still bubbles into the app's normal back behavior.
+    if (e.target instanceof HTMLVideoElement && e.key !== "Escape") {
+      return;
+    }
+
     // Don't handle if user is typing in an input
     if (
       e.target instanceof HTMLInputElement ||

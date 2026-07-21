@@ -18,7 +18,10 @@ const { activeTransitionId, startTransition } = useViewTransition();
 
 function onMouseEnter() {
   // Only preload for non-PTP images (PTP requires camera download)
-  if (!props.image.hif_path.startsWith("ptp://")) {
+  if (
+    props.image.media_type === "Image" &&
+    !props.image.hif_path.startsWith("ptp://")
+  ) {
     startPreload(props.image.hif_path);
   }
 }
@@ -50,6 +53,9 @@ const thumbnailSrc = computed(() => {
   // JPEG-only shoot) never gets a generated thumbnail, so fall back to the
   // HEIF/JPEG itself; otherwise the card shimmers forever and never shows the
   // photo. loading="lazy" + content-visibility keep this to on-screen decodes.
+  if (props.image.media_type === "Video") {
+    return "";
+  }
   if (!props.image.raf_path) {
     return fileUrl(props.image.hif_path);
   }
@@ -72,6 +78,7 @@ const badgeText = computed(() => {
 });
 
 const badgeClass = computed(() => {
+  if (props.image.media_type === "Video") return "badge-heifonly";
   const r = rating.value;
   if (r <= 3) return "badge-heifonly";
   return "badge-heifandraw";
@@ -105,6 +112,13 @@ function openInViewer(e: MouseEvent) {
       </div>
 
       <img v-else :src="thumbnailSrc" :alt="image.id" class="thumbnail" loading="lazy" />
+
+      <div v-if="image.media_type === 'Video'" class="video-badge" title="Video">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+        Video
+      </div>
 
       <!-- Compare mark pip: opposite corner from the star badge -->
       <div class="compare-pip" v-if="marked" title="Marked for comparison (M to unmark)">
@@ -185,6 +199,25 @@ function openInViewer(e: MouseEvent) {
   height: 100%;
   object-fit: cover;
   transition: transform var(--transition-slow);
+}
+
+.video-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(5, 5, 4, 0.78);
+  color: white;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  backdrop-filter: blur(4px);
 }
 
 .image-card:hover .thumbnail {

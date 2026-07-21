@@ -1,4 +1,5 @@
 export type CameraSourceType = "MassStorage" | "Ptp";
+export type MediaType = "Image" | "Video";
 
 export interface CameraVolume {
   name: string;
@@ -13,6 +14,8 @@ export interface ImagePair {
   raf_path: string | null;
   hif_size: number;
   raf_size: number | null;
+  media_type: MediaType;
+  thumbnail_path: string | null;
 }
 
 export type StarRating = 0 | 1 | 2 | 3 | 4 | 5;
@@ -64,6 +67,7 @@ export interface LibraryImage {
   file_size: number;
   date_created: number;
   date_modified: number;
+  media_type: MediaType;
 }
 
 // --- CLIP Search ---

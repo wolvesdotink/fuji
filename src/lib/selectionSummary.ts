@@ -9,6 +9,8 @@ export interface SelectionSummary {
   heifOnly: number;
   /** Images rated 4-5 → import HEIF + RAF. */
   heifAndRaw: number;
+  /** Videos with a non-zero rating → import the original movie. */
+  videos: number;
   /** Images the user has acted on: total - remaining. */
   reviewed: number;
   /** Images with no rating entry at all (truly untouched). */
@@ -40,6 +42,7 @@ export function deriveSelectionSummary(
   let skip = 0;
   let heifOnly = 0;
   let heifAndRaw = 0;
+  let videos = 0;
   let remaining = 0;
   let bytes = 0;
 
@@ -52,7 +55,9 @@ export function deriveSelectionSummary(
       continue;
     }
 
-    if (rating <= 3) {
+    if (img.media_type === "Video") {
+      videos++;
+    } else if (rating <= 3) {
       heifOnly++;
     } else {
       heifAndRaw++;
@@ -70,9 +75,10 @@ export function deriveSelectionSummary(
     skip,
     heifOnly,
     heifAndRaw,
+    videos,
     reviewed: total - remaining,
     remaining,
-    toImport: heifOnly + heifAndRaw,
+    toImport: heifOnly + heifAndRaw + videos,
     bytes,
   };
 }

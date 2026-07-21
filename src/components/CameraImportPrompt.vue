@@ -63,7 +63,7 @@ onUnmounted(() => {
 
         <h2 id="prompt-title" class="prompt-title">Camera detected</h2>
         <p class="prompt-camera-name">{{ cameraName }}</p>
-        <p class="prompt-body">Do you want to import images from this camera?</p>
+        <p class="prompt-body">Do you want to import photos and videos from this camera?</p>
 
         <div class="prompt-actions">
           <button class="prompt-button prompt-button-secondary" @click="onDismiss">

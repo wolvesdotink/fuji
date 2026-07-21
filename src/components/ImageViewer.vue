@@ -99,6 +99,7 @@ watch(
       const adjIdx = newIdx + offset;
       if (adjIdx < 0 || adjIdx >= imgs.length) continue;
       const adjImage = imgs[adjIdx];
+      if (adjImage.media_type === "Video") continue;
       if (adjImage.hif_path.startsWith("ptp://")) {
         // PTP neighbors must be downloaded from the camera first. Limit to
         // the immediate neighbors [-1, 1] to bound camera bandwidth;
@@ -176,9 +177,19 @@ function onRating(r: number) {
         <span>Downloading from camera...</span>
       </div>
 
+      <video
+        v-if="imageSrc && image.media_type === 'Video'"
+        :src="imageSrc"
+        :poster="thumbnailSrc || undefined"
+        :key="'video-' + image.id"
+        class="full-video"
+        controls
+        preload="metadata"
+      />
+
       <!-- Full-res image (fades in over thumbnail) -->
       <img
-        v-if="imageSrc"
+        v-else-if="imageSrc"
         :src="imageSrc"
         :alt="image.id"
         :class="['full-image', { loaded: fullResLoaded }]"
@@ -201,7 +212,7 @@ function onRating(r: number) {
         </span>
         <span class="bar-sep">&middot;</span>
         <span class="sizes">
-          HIF {{ formatSize(image.hif_size) }}
+          {{ image.media_type === 'Video' ? 'Video' : 'HIF' }} {{ formatSize(image.hif_size) }}
           <template v-if="image.raf_size">
             &middot; RAF {{ formatSize(image.raf_size) }}
           </template>
@@ -224,8 +235,10 @@ function onRating(r: number) {
           <kbd class="key-hint-inline">&larr;&rarr;</kbd> navigate
           <span class="hint-sep">&middot;</span>
           <kbd class="key-hint-inline">Space</kbd> next unrated
-          <span class="hint-sep">&middot;</span>
-          <kbd class="key-hint-inline">M</kbd> mark
+          <template v-if="image.media_type === 'Image'">
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">M</kbd> mark
+          </template>
           <template v-if="markedCount >= 2">
             <span class="hint-sep">&middot;</span>
             <kbd class="key-hint-inline">C</kbd> compare ({{ markedCount }})
@@ -278,6 +291,14 @@ function onRating(r: number) {
 
 .full-image.loaded {
   opacity: 1;
+}
+
+.full-video {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 /* Subtle vignette for darkroom feel */

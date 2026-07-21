@@ -365,7 +365,7 @@ function handleEscape(e: KeyboardEvent) {
                 <line x1="12" y1="9" x2="12" y2="13" />
                 <line x1="12" y1="17" x2="12.01" y2="17" />
               </svg>
-              <p>This will permanently delete <strong>all</strong> photos from your camera's SD card &mdash; including {{ skippedCount }} skipped {{ skippedCount === 1 ? 'image' : 'images' }} that {{ skippedCount === 1 ? 'was' : 'were' }} not imported. This cannot be undone.</p>
+              <p>This will permanently delete <strong>all</strong> photos and videos from your camera's SD card &mdash; including {{ skippedCount }} skipped {{ skippedCount === 1 ? 'item' : 'items' }} that {{ skippedCount === 1 ? 'was' : 'were' }} not imported. This cannot be undone.</p>
             </div>
             <div class="actions">
               <button class="btn btn-secondary" @click="showConfirmDeleteAll = false">Cancel</button>
@@ -392,7 +392,7 @@ function handleEscape(e: KeyboardEvent) {
               @click="showConfirmDeleteAll = true"
               :disabled="isDeleting || isDeletingAll"
             >
-              {{ isDeletingAll ? "Deleting\u2026" : "Delete All Photos" }}
+              {{ isDeletingAll ? "Deleting\u2026" : "Delete All Media" }}
             </button>
           </div>
         </template>

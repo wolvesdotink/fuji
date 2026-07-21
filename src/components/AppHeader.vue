@@ -93,7 +93,7 @@ function openCompare() {
           <span class="camera-name">{{ store.camera?.name }}</span>
         </div>
         <div class="header-meta">
-          <span class="image-count">{{ store.images.length }} images</span>
+          <span class="image-count">{{ store.images.length }} media</span>
           <span class="meta-sep">&middot;</span>
           <span class="review-stat">{{ reviewPercent }}% reviewed</span>
         </div>
@@ -112,6 +112,9 @@ function openCompare() {
           </span>
           <span class="pill pill-heif-raw" v-if="summary.heifAndRaw > 0">
             {{ summary.heifAndRaw }} 4&ndash;5&starf;
+          </span>
+          <span class="pill pill-heif" v-if="summary.videos > 0">
+            {{ summary.videos }} videos
           </span>
         </div>
       </div>

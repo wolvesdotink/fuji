@@ -373,18 +373,28 @@ fn ptp_import_files_blocking(
         }
     }
 
-    // Import HIF files to Apple Photos
-    let hif_dest_paths: Vec<String> = result
+    // Import rendered stills and original movies to Apple Photos. RAF files
+    // remain in the destination library but Photos receives only media it can
+    // display directly.
+    let photos_dest_paths: Vec<String> = result
         .downloaded
         .iter()
         .filter(|f| {
             let upper = f.name.to_uppercase();
-            upper.ends_with(".HIF") || upper.ends_with(".HEIF") || upper.ends_with(".HEIC") || upper.ends_with(".JPG") || upper.ends_with(".JPEG")
+            upper.ends_with(".HIF")
+                || upper.ends_with(".HEIF")
+                || upper.ends_with(".HEIC")
+                || upper.ends_with(".JPG")
+                || upper.ends_with(".JPEG")
+                || upper.ends_with(".MOV")
+                || upper.ends_with(".MP4")
+                || upper.ends_with(".M4V")
+                || upper.ends_with(".AVI")
         })
         .map(|f| f.path.clone())
         .collect();
 
-    if !hif_dest_paths.is_empty() {
+    if !photos_dest_paths.is_empty() {
         let _ = on_progress.send(ImportProgress {
             current_file: "Importing to Apple Photos...".to_string(),
             files_completed: files_total,
@@ -394,7 +404,7 @@ fn ptp_import_files_blocking(
             phase: ImportPhase::ImportingToPhotos,
         });
 
-        import_to_apple_photos(&hif_dest_paths)?;
+        import_to_apple_photos(&photos_dest_paths)?;
     }
 
     // Done

@@ -71,12 +71,12 @@ onUnmounted(() => {
       </div>
     </Transition>
 
-    <!-- Empty state (no images, not loading) -->
+    <!-- Empty state (no media, not loading) -->
     <div class="empty-library" v-if="store.displayImages.length === 0 && !store.isLoading">
       <p class="empty-text" v-if="store.searchQuery">
         No results for "{{ store.searchQuery }}"
       </p>
-      <p class="empty-text" v-else>No images found in this folder</p>
+      <p class="empty-text" v-else>No photos or videos found in this folder</p>
     </div>
 
     <!-- Grid -->

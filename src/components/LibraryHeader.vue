@@ -101,7 +101,7 @@ defineExpose({ focusSearch });
           </button>
         </div>
         <div class="header-meta">
-          <span class="image-count">{{ imageCount }} images</span>
+          <span class="image-count">{{ imageCount }} media</span>
           <template v-if="indexStatusText">
             <span class="meta-sep">&middot;</span>
             <span class="index-status">
@@ -123,7 +123,7 @@ defineExpose({ focusSearch });
             v-model="localQuery"
             type="text"
             class="search-input"
-            placeholder="Search images with AI..."
+            placeholder="Search photos and videos with AI..."
             :disabled="!libraryStore.isIndexReady && !libraryStore.isIndexing"
           />
           <div class="search-status" v-if="libraryStore.isSearching">
