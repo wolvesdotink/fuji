@@ -62,14 +62,23 @@ pub struct PtpDownloadedFile {
     pub path: String,
 }
 
-/// A live progress update emitted by the daemon during a download, one per file
-/// as it finishes. `completed` is the number of files downloaded so far.
+/// A live progress update emitted by the daemon during a download: at every file
+/// boundary, plus throttled byte updates while a file transfers.
+/// `completed` is the number of files downloaded so far.
 #[derive(Debug, Deserialize)]
 pub struct PtpDownloadProgress {
     pub completed: u32,
     #[allow(dead_code)]
     pub total: u32,
     pub name: String,
+    /// Bytes transferred so far across the whole batch, including the partial
+    /// bytes of the file in flight. `None` when the camera reports no download
+    /// progress at all, in which case only file boundaries move the number.
+    #[serde(default)]
+    pub bytes_done: Option<u64>,
+    /// Total bytes of the whole batch, from the camera catalog's file sizes.
+    #[serde(default)]
+    pub bytes_total: Option<u64>,
 }
 
 /// Result of a PTP delete command.
@@ -456,29 +465,10 @@ impl PtpBridge {
         serde_json::from_value(result).map_err(|e| format!("Failed to parse catalog result: {}", e))
     }
 
-    pub fn download(
-        &self,
-        camera_name: &str,
-        dest_dir: &str,
-        file_names: &[String],
-    ) -> Result<PtpDownloadResult, String> {
-        let result = self.request(
-            "download",
-            json!({
-                "camera": camera_name,
-                "dest_dir": dest_dir,
-                "files": file_names,
-            }),
-            Duration::from_secs(3600),
-        )?;
-        serde_json::from_value(result)
-            .map_err(|e| format!("Failed to parse download result: {}", e))
-    }
-
-    /// Like `download`, but invokes `on_progress` with a [`PtpDownloadProgress`]
-    /// each time the daemon reports a file finished downloading. The callback
-    /// runs on the bridge reader thread, so it must be `Send + Sync` and must
-    /// not call back into this bridge.
+    /// Download `file_names` into `dest_dir`, invoking `on_progress` with a
+    /// [`PtpDownloadProgress`] as the daemon reports byte and file progress. The
+    /// callback runs on the bridge reader thread, so it must be `Send + Sync` and
+    /// must not call back into this bridge.
     pub fn download_with_progress<F>(
         &self,
         camera_name: &str,
@@ -506,6 +496,21 @@ impl PtpBridge {
         )?;
         serde_json::from_value(result)
             .map_err(|e| format!("Failed to parse download result: {}", e))
+    }
+
+    /// Cancel the download in flight on `camera_name`.
+    ///
+    /// The daemon handles this out-of-band, so it answers immediately rather
+    /// than queueing behind the download it is cancelling — hence the short
+    /// timeout. The cancelled `download` request still returns normally, with
+    /// the cancelled file listed in its `errors`.
+    pub fn cancel(&self, camera_name: &str) -> Result<(), String> {
+        self.request(
+            "cancel",
+            json!({ "camera": camera_name }),
+            Duration::from_secs(10),
+        )?;
+        Ok(())
     }
 
     pub fn delete(

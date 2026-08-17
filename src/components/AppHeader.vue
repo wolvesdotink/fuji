@@ -44,6 +44,33 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
+function formatDuration(seconds: number): string {
+  const total = Math.max(1, Math.round(seconds));
+  if (total < 60) return `${total} s`;
+  const minutes = Math.round(total / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m > 0 ? `${h} h ${m} min` : `${h} h`;
+}
+
+// Measured PTP throughput on Fuji bodies sits around 30 MB/s — the camera's
+// protocol implementation, not the cable, is the ceiling.
+const PTP_BYTES_PER_SECOND = 30 * 1024 * 1024;
+const PTP_VIDEO_HINT_BYTES = 2 * 1024 ** 3;
+
+// A multi-GB video selection over PTP is a multi-minute wait no amount of
+// tuning fixes. Say so (with the ETA) before the user commits, and point at
+// the card reader — finding out mid-import is the worst version of this.
+const ptpVideoHint = computed(() => {
+  if (!store.isPtp()) return null;
+  const bytes = summary.value.videoBytes;
+  if (bytes <= PTP_VIDEO_HINT_BYTES) return null;
+  return `${formatBytes(bytes)} of video over USB-PTP takes about ${formatDuration(
+    bytes / PTP_BYTES_PER_SECOND
+  )} at ~30 MB/s — importing from an SD card reader is several times faster.`;
+});
+
 async function pickDestination() {
   const dir = await open({
     directory: true,
@@ -175,6 +202,15 @@ function openCompare() {
           <span class="import-size">{{ formatBytes(store.totalImportSize) }}</span>
         </button>
       </div>
+    </div>
+
+    <div class="ptp-video-hint" v-if="ptpVideoHint">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9" />
+        <line x1="12" y1="8" x2="12" y2="8" />
+        <line x1="12" y1="12" x2="12" y2="16" />
+      </svg>
+      <span>{{ ptpVideoHint }}</span>
     </div>
 
     <!-- Review minimap: aggregated to ~200 buckets for large galleries -->
@@ -461,6 +497,20 @@ function openCompare() {
 .import-size {
   font-weight: 400;
   opacity: 0.7;
+}
+
+/* PTP throughput warning for large video selections */
+.ptp-video-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 20px 8px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.ptp-video-hint svg {
+  flex-shrink: 0;
 }
 
 /* Review minimap */

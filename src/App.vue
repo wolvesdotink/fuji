@@ -2,9 +2,10 @@
 import { onMounted, onUnmounted, computed } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAppStore } from "@/stores/app";
-import { useGalleryStore } from "@/stores/gallery";
+import { useGalleryStore, ptpPreviewCacheDir } from "@/stores/gallery";
 import { useLibraryStore } from "@/stores/library";
 import { useKeyboardNav } from "@/composables/useKeyboardNav";
+import { prunePreviewCache } from "@/lib/commands";
 import type { CameraVolume } from "@/types";
 import EmptyState from "@/components/EmptyState.vue";
 import AppHeader from "@/components/AppHeader.vue";
@@ -44,6 +45,11 @@ const isStartingUp = computed(
 let unlistenMount: UnlistenFn;
 let unlistenUnmount: UnlistenFn;
 
+// PTP preview downloads (including every video watched while culling) are never
+// deleted on their own, so cap the cache and evict LRU-first at startup. 2 GiB
+// holds a comfortable working set without quietly eating the disk.
+const PREVIEW_CACHE_MAX_BYTES = 2 * 1024 ** 3;
+
 onMounted(async () => {
   // Load persisted config (destination path) — this must complete first so
   // the destination path is known before we sync it or load the library.
@@ -73,6 +79,12 @@ onMounted(async () => {
       appStore.switchToLibrary();
     }
   });
+
+  // Prune the preview cache. Fire-and-forget: it touches nothing the UI reads,
+  // and a failure here must never hold up startup.
+  ptpPreviewCacheDir()
+    .then((dir) => prunePreviewCache(dir, PREVIEW_CACHE_MAX_BYTES))
+    .catch(console.error);
 
   // Scan for already-connected cameras. Not awaited — the library should
   // render immediately; if a camera is found, a non-blocking prompt appears

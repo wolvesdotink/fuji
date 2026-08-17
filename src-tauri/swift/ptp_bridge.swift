@@ -30,6 +30,17 @@ func saveCGImageAsJPEG(_ cgImage: CGImage, to url: URL) -> Bool {
     return CGImageDestinationFinalize(dest)
 }
 
+// MARK: - Daemon Tuning
+
+/// How long a camera session may sit unused before the daemon closes it, so the
+/// camera is not locked forever and can go to sleep, plus how often we look.
+let daemonIdleTimeout: TimeInterval = 60.0
+let daemonIdleCheckInterval: TimeInterval = 15.0
+
+/// Minimum spacing between byte-progress lines. Unthrottled, a fast transfer
+/// emits thousands of NDJSON lines that all end up as webview IPC messages.
+let downloadProgressInterval: TimeInterval = 0.1
+
 // MARK: - PTP Bridge
 
 class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCameraDeviceDownloadDelegate {
@@ -64,6 +75,36 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
     // lookups never race a fresh discovery window.
     var daemonMode = false
     var daemonCameras: [String: ICCameraDevice] = [:]
+
+    // Sessions and catalogs are held across daemon requests: opening a session
+    // costs seconds and a full-card catalog wait costs ~45s, and paying that per
+    // request meant every single-file preview download during culling re-paid it.
+    // Keyed by object identity because serialNumberString is unreliable once a
+    // device starts going away (same reason didRemove matches by identity).
+    var daemonSessions: Set<ObjectIdentifier> = []
+    var daemonCatalogReady: Set<ObjectIdentifier> = []
+
+    /// Nesting depth of in-flight daemon requests. A depth > 0 means the main
+    /// thread is inside a command's nested run loop, so the idle timer must not
+    /// pull the session out from under it. It is a depth rather than a flag
+    /// because out-of-band commands (`cancel`) run re-entrantly.
+    var daemonBusyDepth = 0
+    var daemonLastActivity = Date()
+    var daemonIdleTimer: Timer?
+
+    // Byte progress for the download request currently in flight. `bytesBase` is
+    // the summed size of the files that already finished, so base + the current
+    // file's partial count is the batch-cumulative figure the UI turns into a
+    // rate and ETA.
+    var downloadProgressId: Int?
+    var downloadBytesBase: Int64 = 0
+    var downloadBytesTotal: Int64 = 0
+    var downloadCurrentBytes: Int64 = 0
+    var downloadFilesCompleted = 0
+    var downloadFilesTotal = 0
+    var downloadCurrentName = ""
+    var lastProgressEmit = Date.distantPast
+    var downloadCancelled = false
 
     override init() {
         super.init()
@@ -128,6 +169,22 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
     // MARK: - Session Management
 
+    /// Spin the main run loop until `isDone` or the deadline passes.
+    ///
+    /// ImageCaptureCore delivers everything through main-thread delegate
+    /// callbacks, so we have to drain the run loop while waiting. Those
+    /// callbacks call `CFRunLoopStop(CFRunLoopGetMain())`, which returns from the
+    /// slice the moment the event lands instead of on the next tick. The slice is
+    /// kept short anyway as a backstop, since it also bounds how long a wait
+    /// overshoots its own deadline.
+    func waitForCallback(timeout: TimeInterval, isDone: () -> Bool) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while !isDone() && Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        return isDone()
+    }
+
     func openSession(camera: ICCameraDevice, timeout: TimeInterval = 10.0) -> Bool {
         sessionOpened = false
         sessionError = nil
@@ -135,10 +192,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         camera.delegate = self
         camera.requestOpenSession()
 
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while !sessionOpened && Date() < deadline {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-        }
+        _ = waitForCallback(timeout: timeout) { sessionOpened }
 
         return sessionOpened && sessionError == nil
     }
@@ -177,10 +231,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         sessionCloseError = nil
         camera.requestCloseSession()
 
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while !sessionCloseDone && Date() < deadline {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-        }
+        _ = waitForCallback(timeout: timeout) { sessionCloseDone }
 
         if !sessionCloseDone {
             stderrLog("Session close timed out")
@@ -191,6 +242,80 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             return false
         }
         return true
+    }
+
+    // MARK: - Persistent Daemon Sessions
+
+    /// Open a session only if we do not already hold one. `hasOpenSession` is
+    /// consulted as well as our own bookkeeping so a session the camera dropped
+    /// behind our back (sleep, cable glitch) is reopened rather than used.
+    func ensureSession(camera: ICCameraDevice) -> Bool {
+        // Original assets, so RAW+HEIF pairs show up instead of rendered
+        // previews. Assigned only when it differs, because changing the
+        // presentation re-enumerates the device content and would invalidate the
+        // catalog readiness cached below.
+        if camera.mediaPresentation != .originalAssets {
+            camera.mediaPresentation = .originalAssets
+        }
+
+        let key = ObjectIdentifier(camera)
+        if daemonSessions.contains(key) && camera.hasOpenSession {
+            return true
+        }
+        if daemonSessions.contains(key) {
+            stderrLog("Daemon: session on '\(camera.name ?? "?")' was dropped, reopening")
+            daemonSessions.remove(key)
+            daemonCatalogReady.remove(key)
+        }
+        guard openSession(camera: camera) else { return false }
+        daemonSessions.insert(key)
+        return true
+    }
+
+    /// Wait for the content catalog unless this session already completed one.
+    /// The first interaction after connect pays the wait; everything after it
+    /// starts transferring immediately.
+    func ensureCatalog(camera: ICCameraDevice, timeout: TimeInterval = 60.0) -> Bool {
+        let key = ObjectIdentifier(camera)
+        if daemonCatalogReady.contains(key) {
+            return true
+        }
+        guard waitForCatalog(camera: camera, timeout: timeout) else { return false }
+        daemonCatalogReady.insert(key)
+        return true
+    }
+
+    /// Explicitly give a camera back. Only the idle timer, shutdown and failed
+    /// requests do this — successful requests leave the session open.
+    func releaseSession(camera: ICCameraDevice) {
+        let key = ObjectIdentifier(camera)
+        daemonSessions.remove(key)
+        daemonCatalogReady.remove(key)
+        _ = closeSession(camera: camera)
+    }
+
+    /// Drop session bookkeeping for a camera that is already gone. Closing a
+    /// session on an unplugged device is pointless and would just time out.
+    func forgetSession(camera: ICCameraDevice) {
+        let key = ObjectIdentifier(camera)
+        daemonSessions.remove(key)
+        daemonCatalogReady.remove(key)
+    }
+
+    func closeAllDaemonSessions() {
+        for camera in daemonCameras.values where daemonSessions.contains(ObjectIdentifier(camera)) {
+            stderrLog("Daemon: closing session on '\(camera.name ?? "?")'")
+            releaseSession(camera: camera)
+        }
+    }
+
+    /// Idle-timer tick. Skipped while a request is in flight, since closing the
+    /// session mid-download would abort it.
+    func closeIdleSessions() {
+        guard daemonBusyDepth == 0, !daemonSessions.isEmpty else { return }
+        guard Date().timeIntervalSince(daemonLastActivity) >= daemonIdleTimeout else { return }
+        stderrLog("Daemon: idle for \(Int(daemonIdleTimeout))s, releasing camera session(s)")
+        closeAllDaemonSessions()
     }
 
     // MARK: - Thumbnail Requests
@@ -238,10 +363,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         camera.requestDownloadFile(file, options: options, downloadDelegate: self, didDownloadSelector: #selector(didDownloadFile(_:error:options:contextInfo:)), contextInfo: nil)
 
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while !downloadDone && Date() < deadline {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-        }
+        _ = waitForCallback(timeout: timeout) { downloadDone }
 
         if let error = downloadError {
             stderrLog("Download error: \(error.localizedDescription)")
@@ -259,10 +381,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         camera.requestDeleteFiles(files)
 
-        let deadline = Date(timeIntervalSinceNow: timeout)
-        while !deleteDone && Date() < deadline {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
-        }
+        _ = waitForCallback(timeout: timeout) { deleteDone }
 
         // The old implementation returned nil here even when the delegate
         // callback never arrived, causing the UI to announce a successful
@@ -300,6 +419,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
                 // Match by object identity — serialNumberString can return nil
                 // after removal begins, so key-based lookup is unreliable here.
                 daemonCameras = daemonCameras.filter { _, cam in cam !== camera }
+                forgetSession(camera: camera)
                 stderrLog("Daemon: registry size after remove = \(daemonCameras.count)")
             }
         }
@@ -315,11 +435,13 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         } else {
             stderrLog("Session opened successfully")
         }
+        CFRunLoopStop(CFRunLoopGetMain())
     }
 
     func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
         sessionCloseError = error
         sessionCloseDone = true
+        CFRunLoopStop(CFRunLoopGetMain())
     }
 
     func didRemove(_ device: ICDevice) {}
@@ -343,6 +465,10 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
     func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         stderrLog("Content catalog complete. Files: \(device.mediaFiles?.count ?? 0)")
         catalogDone = true
+        if daemonMode {
+            daemonCatalogReady.insert(ObjectIdentifier(device))
+        }
+        CFRunLoopStop(CFRunLoopGetMain())
     }
 
 
@@ -360,6 +486,7 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
     func cameraDevice(_ camera: ICCameraDevice, didCompleteDeleteFilesWithError error: (any Error)?) {
         deleteError = error
         deleteDone = true
+        CFRunLoopStop(CFRunLoopGetMain())
     }
 
     // MARK: - ICCameraDeviceDownloadDelegate
@@ -375,6 +502,36 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         }
 
         downloadDone = true
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
+
+    /// Optional download-delegate hook: the only place ImageCaptureCore tells us
+    /// anything mid-transfer. Declared with its explicit Objective-C selector
+    /// because ImageCaptureCore discovers it via `respondsToSelector:`.
+    ///
+    /// Granularity is up to the device — some cameras report every few hundred
+    /// KB, others once per file — so consumers must tolerate coarse updates.
+    @objc(didReceiveDownloadProgressForFile:downloadedBytes:maxBytes:)
+    func didReceiveDownloadProgress(for file: ICCameraFile, downloadedBytes: off_t, maxBytes: off_t) {
+        guard let id = downloadProgressId else { return }
+        downloadCurrentBytes = downloadedBytes
+
+        let now = Date()
+        guard now.timeIntervalSince(lastProgressEmit) >= downloadProgressInterval else { return }
+        lastProgressEmit = now
+        emitDownloadProgress(id: id)
+    }
+
+    /// Emit the batch-cumulative byte progress line for the in-flight download.
+    func emitDownloadProgress(id: Int) {
+        writeDaemonProgress(
+            id: id,
+            completed: downloadFilesCompleted,
+            total: downloadFilesTotal,
+            name: downloadCurrentName,
+            bytesDone: downloadBytesBase + downloadCurrentBytes,
+            bytesTotal: downloadBytesTotal
+        )
     }
 
     // MARK: - One-shot Commands (CLI compat)
@@ -620,13 +777,18 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
     /// Unlike `writeDaemonResponse`, this carries no `ok`/`result` so the Rust
     /// reader routes it to the request's progress handler without completing the
     /// request. Same unbuffered write so the parent sees it immediately.
-    func writeDaemonProgress(id: Int, completed: Int, total: Int, name: String) {
+    /// `bytesDone` is cumulative across the whole batch (finished files plus the
+    /// current file's partial transfer) so the Rust side can hand it straight to
+    /// the UI's rate/ETA maths without tracking file boundaries itself.
+    func writeDaemonProgress(id: Int, completed: Int, total: Int, name: String, bytesDone: Int64, bytesTotal: Int64) {
         let line: [String: Any] = [
             "id": id,
             "event": "progress",
             "completed": completed,
             "total": total,
-            "name": name
+            "name": name,
+            "bytes_done": bytesDone,
+            "bytes_total": bytesTotal
         ]
 
         let data: Data
@@ -658,6 +820,13 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         }
         stderrLog("Daemon warmed up with \(daemonCameras.count) camera(s)")
 
+        // Sessions are kept open across requests, so something has to hand the
+        // camera back when the user stops culling. The timer also guarantees the
+        // run loop below always has a source, so it never returns immediately.
+        daemonIdleTimer = Timer.scheduledTimer(withTimeInterval: daemonIdleCheckInterval, repeats: true) { [weak self] _ in
+            self?.closeIdleSessions()
+        }
+
         // Read stdin from a background thread. Each line is dispatched
         // synchronously to the main thread so ICCameraDevice operations
         // (which require main-thread delegate callbacks) work correctly.
@@ -665,6 +834,17 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         // until each command returns before consuming the next line.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             while let line = readLine() {
+                if PtpBridge.isOutOfBandCommand(line) {
+                    // `cancel` must not queue behind the download it cancels:
+                    // sync dispatch would keep this thread — and therefore the
+                    // next readLine() — blocked until that download finished.
+                    // Async lands it in the main queue, which the download's
+                    // nested run loop drains while it waits.
+                    DispatchQueue.main.async {
+                        self?.handleDaemonRequest(line)
+                    }
+                    continue
+                }
                 DispatchQueue.main.sync {
                     self?.handleDaemonRequest(line)
                 }
@@ -672,19 +852,46 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             // stdin closed → parent wants us to exit
             stderrLog("Daemon: stdin closed, exiting")
             DispatchQueue.main.sync {
+                self?.closeAllDaemonSessions()
                 self?.browser.stop()
                 exit(0)
             }
         }
 
-        // Main thread blocks here forever, draining device callbacks and
-        // dispatched command handlers.
-        RunLoop.main.run()
+        // Main thread blocks here, draining device callbacks and dispatched
+        // command handlers. Re-entered in a loop rather than using
+        // `RunLoop.main.run()`: the delegate callbacks call CFRunLoopStop to
+        // wake the nested waits, and a callback arriving while the daemon is
+        // idle would otherwise return from the outermost run loop and exit.
+        while true {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0))
+        }
+    }
+
+    /// Commands that may be handled re-entrantly while another command is still
+    /// running on the main thread. Only cancellation qualifies: everything else
+    /// touches session/download state that assumes serialized execution.
+    static func isOutOfBandCommand(_ line: String) -> Bool {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cmd = json["cmd"] as? String else {
+            return false
+        }
+        return cmd == "cancel"
     }
 
     func handleDaemonRequest(_ line: String) {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        // Any activity keeps the held-open session alive, and the depth tells the
+        // idle timer to stay out of the way while a command is running.
+        daemonBusyDepth += 1
+        daemonLastActivity = Date()
+        defer {
+            daemonBusyDepth -= 1
+            daemonLastActivity = Date()
+        }
 
         guard let data = trimmed.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -727,8 +934,16 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             }
             handleDaemonDelete(id: id, cameraName: camera, fileNames: files)
 
+        case "cancel":
+            guard let camera = json["camera"] as? String else {
+                writeDaemonResponse(id: id, ok: false, error: "cancel requires 'camera'")
+                return
+            }
+            handleDaemonCancel(id: id, cameraName: camera)
+
         case "shutdown":
             writeDaemonResponse(id: id, ok: true, result: ["bye": true])
+            closeAllDaemonSessions()
             browser.stop()
             exit(0)
 
@@ -754,16 +969,14 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             return
         }
 
-        camera.mediaPresentation = .originalAssets
-
-        guard openSession(camera: camera) else {
+        guard ensureSession(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Failed to open session: \(sessionError?.localizedDescription ?? "timeout")")
             return
         }
 
-        guard waitForCatalog(camera: camera) else {
+        guard ensureCatalog(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Content cataloging timed out")
-            _ = closeSession(camera: camera)
+            releaseSession(camera: camera)
             return
         }
 
@@ -803,10 +1016,10 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             files.append(entry)
         }
 
-        _ = closeSession(camera: camera)
-        // NOTE: do NOT call stopBrowsing() — the daemon keeps the browser alive
-        // across requests so the next catalog/download doesn't have to
-        // rediscover the camera.
+        // NOTE: neither stopBrowsing() nor closeSession() here — the daemon keeps
+        // the browser AND the camera session alive across requests, so the next
+        // catalog/download doesn't have to rediscover the camera or re-wait for
+        // its content catalog. The idle timer closes the session eventually.
 
         let result: [String: Any] = [
             "camera": camera.name ?? "Unknown",
@@ -821,16 +1034,14 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
             return
         }
 
-        camera.mediaPresentation = .originalAssets
-
-        guard openSession(camera: camera) else {
+        guard ensureSession(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Failed to open session: \(sessionError?.localizedDescription ?? "timeout")")
             return
         }
 
-        guard waitForCatalog(camera: camera) else {
+        guard ensureCatalog(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Content cataloging timed out")
-            _ = closeSession(camera: camera)
+            releaseSession(camera: camera)
             return
         }
 
@@ -842,33 +1053,60 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         let filesToDownload = mediaFiles.filter { ($0.name).map(fileNameSet.contains) ?? false }
         let totalToDownload = filesToDownload.count
 
+        // Byte totals come from the catalog's fileSize rather than the download
+        // delegate's maxBytes, so the UI has a stable denominator for the whole
+        // batch from the very first progress line.
+        downloadProgressId = id
+        downloadBytesBase = 0
+        downloadBytesTotal = filesToDownload.reduce(Int64(0)) { $0 + $1.fileSize }
+        downloadCurrentBytes = 0
+        downloadFilesCompleted = 0
+        downloadFilesTotal = totalToDownload
+        downloadCurrentName = ""
+        lastProgressEmit = Date.distantPast
+        downloadCancelled = false
+        defer {
+            downloadProgressId = nil
+            downloadCurrentBytes = 0
+        }
+
         var downloaded: [[String: Any]] = []
         var errors: [String] = []
 
         for file in filesToDownload {
             guard let name = file.name else { continue }
 
-            stderrLog("Daemon: Downloading \(name)...")
+            if downloadCancelled {
+                errors.append("Download cancelled before \(name)")
+                continue
+            }
+
+            downloadCurrentName = name
+            downloadCurrentBytes = 0
+            stderrLog("Daemon: Downloading \(name) (\(file.fileSize) bytes)...")
             if let resultURL = downloadFile(camera: camera, file: file, destDir: destURL) {
                 downloaded.append([
                     "name": name,
                     "path": resultURL.path
                 ])
+            } else if downloadCancelled {
+                errors.append("Download of \(name) cancelled")
             } else {
                 errors.append("Failed to download \(name): \(downloadError?.localizedDescription ?? "unknown error")")
             }
 
-            // Emit live progress after each file settles (success or failure) so
-            // the import counter reflects the actual number imported so far.
-            writeDaemonProgress(
-                id: id,
-                completed: downloaded.count,
-                total: totalToDownload,
-                name: name
-            )
+            // The file settled (success, failure or cancellation): fold its full
+            // size into the base so cumulative bytes stay monotonic even when the
+            // device reported progress coarsely, and emit unthrottled so the
+            // counter never lags behind a completed file.
+            downloadFilesCompleted = downloaded.count
+            downloadBytesBase += file.fileSize
+            downloadCurrentBytes = 0
+            lastProgressEmit = Date()
+            emitDownloadProgress(id: id)
         }
 
-        _ = closeSession(camera: camera)
+        // Session intentionally left open — see handleDaemonCatalog.
 
         let result: [String: Any] = [
             "downloaded": downloaded,
@@ -877,22 +1115,42 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         writeDaemonResponse(id: id, ok: true, result: result)
     }
 
+    /// Cancel whatever this camera is currently downloading. Dispatched
+    /// out-of-band (see `isOutOfBandCommand`), so this runs re-entrantly inside
+    /// the run loop the download itself is spinning; `downloadCancelled` is what
+    /// tells that loop to stop after the current file unwinds.
+    func handleDaemonCancel(id: Int, cameraName: String) {
+        guard let camera = findDaemonCamera(identifier: cameraName) else {
+            writeDaemonResponse(id: id, ok: false, error: "Camera not found: \(cameraName)")
+            return
+        }
+
+        downloadCancelled = true
+        camera.cancelDownload()
+        stderrLog("Daemon: cancel requested on '\(camera.name ?? "?")'")
+        writeDaemonResponse(id: id, ok: true, result: ["cancelled": true])
+    }
+
     func handleDaemonDelete(id: Int, cameraName: String, fileNames: [String]) {
         guard let camera = findDaemonCamera(identifier: cameraName) else {
             writeDaemonResponse(id: id, ok: false, error: "Camera not found: \(cameraName)")
             return
         }
 
-        camera.mediaPresentation = .originalAssets
-
-        guard openSession(camera: camera) else {
+        // Deletes run on the same held-open session as the import that preceded
+        // them, which removes the race `closeSession` documents (a delete opening
+        // a session while the download session's async close was still in flight)
+        // instead of merely sequencing around it. If a body ever turns out to
+        // refuse deletes on a long-lived session, bracket just this handler in
+        // releaseSession + ensureSession.
+        guard ensureSession(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Failed to open session: \(sessionError?.localizedDescription ?? "timeout")")
             return
         }
 
-        guard waitForCatalog(camera: camera) else {
+        guard ensureCatalog(camera: camera) else {
             writeDaemonResponse(id: id, ok: false, error: "Content cataloging timed out")
-            _ = closeSession(camera: camera)
+            releaseSession(camera: camera)
             return
         }
 
@@ -901,7 +1159,6 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         let filesToDelete = mediaFiles.filter { fileNameSet.contains($0.name ?? "") }
 
         if filesToDelete.isEmpty {
-            _ = closeSession(camera: camera)
             let result: [String: Any] = ["deleted": 0, "errors": ["No matching files found"]]
             writeDaemonResponse(id: id, ok: true, result: result)
             return
@@ -909,7 +1166,6 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
 
         stderrLog("Daemon: Deleting \(filesToDelete.count) files...")
         let error = deleteFiles(camera: camera, files: filesToDelete.map { $0 as ICCameraItem })
-        _ = closeSession(camera: camera)
 
         var result: [String: Any] = ["deleted": filesToDelete.count]
         if let error = error {
