@@ -3,6 +3,10 @@ import { useAppStore } from "@/stores/app";
 import { useGalleryStore } from "@/stores/gallery";
 import { useLibraryStore } from "@/stores/library";
 import { useViewTransition } from "@/composables/useViewTransition";
+import {
+  activeVideoPlayer,
+  type VideoPlayerHandle,
+} from "@/lib/videoPlayerBus";
 
 export function useKeyboardNav() {
   const appStore = useAppStore();
@@ -10,10 +14,70 @@ export function useKeyboardNav() {
   const libraryStore = useLibraryStore();
   const { startTransition } = useViewTransition();
 
+  /**
+   * Player keys, routed through the videoPlayerBus rather than element focus —
+   * the user normally arrives on a clip via the arrow keys, so the <video> is
+   * never focused and a focus-based scheme would leave the player unreachable.
+   * Returns true when the key was consumed.
+   *
+   * Navigation (arrows) and rating (0-5) are deliberately absent: culling stays
+   * the primary flow, so seeking gets its own keys and rating is never hijacked.
+   */
+  function handleVideoKeys(e: KeyboardEvent, player: VideoPlayerHandle) {
+    switch (e.key) {
+      case " ":
+      case "k":
+      case "K":
+        e.preventDefault();
+        player.togglePlay();
+        return true;
+      case "j":
+      case "J":
+        e.preventDefault();
+        player.seekBy(-5);
+        return true;
+      case "l":
+      case "L":
+        e.preventDefault();
+        player.seekBy(5);
+        return true;
+      // Frame stepping for judging sharpness on a clip. stepFrame pauses first,
+      // so these work whether or not playback is running.
+      case ",":
+        e.preventDefault();
+        player.stepFrame(-1);
+        return true;
+      case ".":
+        e.preventDefault();
+        player.stepFrame(1);
+        return true;
+      case "f":
+      case "F":
+        e.preventDefault();
+        player.toggleFullscreen();
+        return true;
+      // Safe to claim: toggleMarkForCompare already no-ops for videos, so M
+      // has nothing else to do here.
+      case "m":
+      case "M":
+        e.preventDefault();
+        player.toggleMute();
+        return true;
+      default:
+        return false;
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
-    // Let native video controls own Space and arrow keys for play/pause and
-    // seeking. Escape still bubbles into the app's normal back behavior.
-    if (e.target instanceof HTMLVideoElement && e.key !== "Escape") {
+    // Native-controls fallback (VideoPlayer's `nativeControls` prop): when the
+    // browser's own control bar owns the element, let it keep Space and the
+    // arrow keys. The custom player has `controls` off and routes keys through
+    // the bus instead, so it never matches here.
+    if (
+      e.target instanceof HTMLVideoElement &&
+      e.target.controls &&
+      e.key !== "Escape"
+    ) {
       return;
     }
 
@@ -38,6 +102,16 @@ export function useKeyboardNav() {
   }
 
   function handleLibraryKeys(e: KeyboardEvent) {
+    const player = activeVideoPlayer.value;
+    if (
+      player &&
+      libraryStore.viewMode === "single" &&
+      libraryStore.currentImage?.media_type === "Video" &&
+      handleVideoKeys(e, player)
+    ) {
+      return;
+    }
+
     switch (e.key) {
       case "ArrowLeft":
         e.preventDefault();
@@ -124,6 +198,18 @@ export function useKeyboardNav() {
       } else {
         return;
       }
+    }
+
+    // On a clip in single view the player claims Space/J/K/L/,/./F/M. Compare
+    // mode is excluded by the viewMode check (it never holds videos anyway).
+    const player = activeVideoPlayer.value;
+    if (
+      player &&
+      galleryStore.viewMode === "single" &&
+      galleryStore.currentImage?.media_type === "Video" &&
+      handleVideoKeys(e, player)
+    ) {
+      return;
     }
 
     switch (e.key) {

@@ -19,6 +19,12 @@ export interface SelectionSummary {
   toImport: number;
   /** Total bytes that will be copied for the current selection. */
   bytes: number;
+  /**
+   * Subset of `bytes` contributed by videos. Broken out because video volume
+   * is what makes a PTP import take minutes rather than seconds, so the UI
+   * warns on it specifically.
+   */
+  videoBytes: number;
 }
 
 /**
@@ -34,6 +40,7 @@ export interface SelectionSummary {
  *                counts as reviewed-but-skipped, not untouched.
  *  - `reviewed`  is `total - remaining` (a stored 0 counts as reviewed).
  *  - `bytes`     sums HIF size for every rated image, plus RAF size at 4-5.
+ *  - `videoBytes` is the video-only share of `bytes`.
  */
 export function deriveSelectionSummary(
   images: readonly ImagePair[],
@@ -45,6 +52,7 @@ export function deriveSelectionSummary(
   let videos = 0;
   let remaining = 0;
   let bytes = 0;
+  let videoBytes = 0;
 
   for (const img of images) {
     if (!ratings.has(img.id)) remaining++;
@@ -57,6 +65,7 @@ export function deriveSelectionSummary(
 
     if (img.media_type === "Video") {
       videos++;
+      videoBytes += img.hif_size;
     } else if (rating <= 3) {
       heifOnly++;
     } else {
@@ -80,5 +89,6 @@ export function deriveSelectionSummary(
     remaining,
     toImport: heifOnly + heifAndRaw + videos,
     bytes,
+    videoBytes,
   };
 }

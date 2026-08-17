@@ -6,6 +6,7 @@ import type {
   SelectionChoice,
   ImportSelection,
   ImportProgress,
+  PtpFileProgress,
 } from "@/types";
 import { homeDir, join } from "@tauri-apps/api/path";
 import {
@@ -13,6 +14,7 @@ import {
   listImages,
   ptpListImages,
   ptpDownloadFile,
+  ptpCancelDownload,
   ptpImportFiles,
   ptpDeleteFiles,
   generateThumbnails,
@@ -23,6 +25,17 @@ import {
 } from "@/lib/commands";
 import { useAppStore } from "@/stores/app";
 import { deriveSelectionSummary } from "@/lib/selectionSummary";
+
+/**
+ * Where single-file PTP downloads land while culling. Shared (rather than
+ * re-derived at each call site) because three separate consumers must agree on
+ * it: the viewer preview download, the importer — which copies from here
+ * instead of re-fetching from the camera — and the startup LRU prune.
+ */
+export async function ptpPreviewCacheDir(): Promise<string> {
+  const home = await homeDir();
+  return join(home, ".cache", "fuji-culler", "ptp-preview");
+}
 
 export const useGalleryStore = defineStore("gallery", () => {
   // Camera state
@@ -135,6 +148,11 @@ export const useGalleryStore = defineStore("gallery", () => {
   // requests for the same file (e.g. the viewer opening an image while the
   // neighbor-prefetch is already downloading it) so we hit the camera once.
   const ptpInFlight = new Map<string, Promise<string>>();
+  // Live byte counters for in-flight PTP downloads, image id → progress.
+  // Only populated while a download is running: the entry is deleted on
+  // completion, failure and cancellation alike, so "has an entry" means
+  // "bytes are moving right now".
+  const ptpDownloadProgress = ref<Map<string, PtpFileProgress>>(new Map());
 
   // Actions
   async function scanCamera() {
@@ -395,6 +413,29 @@ export const useGalleryStore = defineStore("gallery", () => {
     }
   }
 
+  /**
+   * The rated subset of the gallery, in ImportSelection shape. Sizes are
+   * carried along so the backend can pre-sum a byte total for progress (PTP
+   * can't stat files cheaply) and size-check preview-cache hits.
+   */
+  function buildImportSelections(): ImportSelection[] {
+    const selections: ImportSelection[] = [];
+    for (const img of images.value) {
+      const rating = ratings.value.get(img.id);
+      if (!rating || rating <= 0) continue;
+      selections.push({
+        image_id: img.id,
+        choice: selectionFromRating(rating, img.media_type),
+        hif_path: img.hif_path,
+        raf_path: img.raf_path,
+        rating,
+        hif_size: img.hif_size,
+        raf_size: img.raf_size,
+      });
+    }
+    return selections;
+  }
+
   async function startImport() {
     if (!canImport.value) return;
 
@@ -407,21 +448,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     importError.value = "";
     importProgress.value = null;
 
-    const importSelections: ImportSelection[] = images.value
-      .filter((img) => {
-        const rating = ratings.value.get(img.id);
-        return rating && rating > 0;
-      })
-      .map((img) => {
-        const rating = ratings.value.get(img.id)!;
-        return {
-          image_id: img.id,
-          choice: selectionFromRating(rating, img.media_type),
-          hif_path: img.hif_path,
-          raf_path: img.raf_path,
-          rating,
-        };
-      });
+    const importSelections = buildImportSelections();
 
     const onProgress = (progress: ImportProgress) => {
       // First progress event flips us out of "preparing" into live "importing"
@@ -431,11 +458,15 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     try {
       if (isPtp() && camera.value) {
-        // PTP import: download from camera via ptp-bridge
+        // PTP import: download from camera via ptp-bridge. Hand it the preview
+        // cache so anything already pulled while culling (notably that 4 GB
+        // clip the user just watched) is copied from disk instead of re-fetched
+        // over USB.
         await ptpImportFiles(
           camera.value.mount_path,
           importSelections,
           importDestination.value,
+          await ptpPreviewCacheDir(),
           onProgress
         );
       } else {
@@ -453,21 +484,7 @@ export const useGalleryStore = defineStore("gallery", () => {
   }
 
   async function clearCamera() {
-    const importSelections: ImportSelection[] = images.value
-      .filter((img) => {
-        const rating = ratings.value.get(img.id);
-        return rating && rating > 0;
-      })
-      .map((img) => {
-        const rating = ratings.value.get(img.id)!;
-        return {
-          image_id: img.id,
-          choice: selectionFromRating(rating, img.media_type),
-          hif_path: img.hif_path,
-          raf_path: img.raf_path,
-          rating,
-        };
-      });
+    const importSelections = buildImportSelections();
 
     try {
       if (isPtp() && camera.value) {
@@ -546,14 +563,24 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     const cam = camera.value;
     const download = (async () => {
-      const home = await homeDir();
-      const cacheDir = await join(home, ".cache", "fuji-culler", "ptp-preview");
+      const cacheDir = await ptpPreviewCacheDir();
       const fileName = ptpFileName(hifPath);
-      const localPath = await ptpDownloadFile(cam.mount_path, fileName, cacheDir);
-      // In-place .set — Vue tracks Map access per key, so only consumers of
-      // this imageId recompute (a full Map reassignment invalidates them all).
-      ptpPreviewCache.value.set(imageId, localPath);
-      return localPath;
+      try {
+        const localPath = await ptpDownloadFile(
+          cam.mount_path,
+          fileName,
+          cacheDir,
+          (progress) => ptpDownloadProgress.value.set(imageId, progress)
+        );
+        // In-place .set — Vue tracks Map access per key, so only consumers of
+        // this imageId recompute (a full Map reassignment invalidates them all).
+        ptpPreviewCache.value.set(imageId, localPath);
+        return localPath;
+      } finally {
+        // Done, failed or cancelled — either way no bytes are moving, so drop
+        // the counter and let the UI fall back to its indeterminate state.
+        ptpDownloadProgress.value.delete(imageId);
+      }
     })();
 
     ptpInFlight.set(imageId, download);
@@ -561,6 +588,21 @@ export const useGalleryStore = defineStore("gallery", () => {
       return await download;
     } finally {
       ptpInFlight.delete(imageId);
+    }
+  }
+
+  /**
+   * Abort whatever the camera is currently sending us. Used when the user hits
+   * Cancel on the viewer's progress card, or navigates away from a big video
+   * mid-transfer — the pending ptpDownloadFile promise rejects, which unwinds
+   * ensurePtpPreview and clears the progress entry.
+   */
+  async function cancelPtpDownload() {
+    if (!camera.value || !isPtp()) return;
+    try {
+      await ptpCancelDownload(camera.value.mount_path);
+    } catch (e) {
+      console.error("Failed to cancel PTP download:", e);
     }
   }
 
@@ -642,10 +684,12 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     // PTP state
     ptpPreviewCache,
+    ptpDownloadProgress,
 
     // Actions
     isPtp,
     ensurePtpPreview,
+    cancelPtpDownload,
     scanCamera,
     loadImages,
     retryLoadImages,

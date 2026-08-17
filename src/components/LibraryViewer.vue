@@ -4,6 +4,7 @@ import { useLibraryStore } from "@/stores/library";
 import { fileUrl } from "@/lib/commands";
 import { decodeAhead } from "@/composables/useHoverPreload";
 import StarRating from "@/components/StarRating.vue";
+import VideoPlayer from "@/components/VideoPlayer.vue";
 
 const store = useLibraryStore();
 
@@ -127,14 +128,12 @@ function onRating(r: number) {
         :key="'thumb-' + image.id"
       />
 
-      <video
+      <VideoPlayer
         v-if="image.media_type === 'Video'"
         :src="imageSrc"
         :poster="thumbnailSrc || undefined"
         :key="'video-' + image.id"
         class="full-video"
-        controls
-        preload="metadata"
       />
 
       <!-- Full-res image (fades in over thumbnail) -->
@@ -178,6 +177,14 @@ function onRating(r: number) {
           <span class="hint-sep">&middot;</span>
           <kbd class="key-hint-inline">&larr;&rarr;</kbd> navigate
           <span class="hint-sep">&middot;</span>
+          <template v-if="image.media_type === 'Video'">
+            <kbd class="key-hint-inline">Space</kbd> play
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">J</kbd>/<kbd class="key-hint-inline">L</kbd> seek
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">F</kbd> fullscreen
+            <span class="hint-sep">&middot;</span>
+          </template>
           <kbd class="key-hint-inline">G</kbd> grid
           <span class="hint-sep">&middot;</span>
           <kbd class="key-hint-inline">Esc</kbd> back
@@ -231,12 +238,10 @@ function onRating(r: number) {
   opacity: 1;
 }
 
+/* Video stage — VideoPlayer sizes its own <video> and control bar inside */
 .full-video {
-  max-width: 100%;
-  max-height: 100%;
   width: 100%;
   height: 100%;
-  object-fit: contain;
 }
 
 .vignette {

@@ -4,6 +4,7 @@ import { useGalleryStore } from "@/stores/gallery";
 import { fileUrl } from "@/lib/commands";
 import { decodeAhead } from "@/composables/useHoverPreload";
 import StarRating from "@/components/StarRating.vue";
+import VideoPlayer from "@/components/VideoPlayer.vue";
 
 const store = useGalleryStore();
 
@@ -19,12 +20,32 @@ const markedCount = computed(() => store.markedForCompare.size);
 // For PTP images, we need to download the HIF before displaying
 const ptpLocalPath = ref<string | null>(null);
 const ptpLoading = ref(false);
+// Monotonic guard against out-of-order completion: a download that resolves (or
+// rejects, after a cancel) for a previous image must not clear the spinner or
+// paint its path over the item the user has since navigated to.
+let previewToken = 0;
 
 watch(
   () => image.value?.id,
-  async () => {
+  async (id, prevId) => {
+    // Leaving a video that's still coming down the wire? Cancel it. A multi-GB
+    // clip would otherwise keep saturating the USB link — and starving the
+    // neighbour prefetch — for minutes while the user culls on. Stills are
+    // small and their bytes get reused by the prefetch, so those run to
+    // completion rather than churning the camera with cancel/restart cycles.
+    if (
+      prevId &&
+      prevId !== id &&
+      ptpLoading.value &&
+      store.isPtp() &&
+      store.imageById.get(prevId)?.media_type === "Video"
+    ) {
+      void store.cancelPtpDownload();
+    }
+
     if (!image.value) return;
     if (store.isPtp() && image.value.hif_path.startsWith("ptp://")) {
+      const token = ++previewToken;
       ptpLoading.value = true;
       ptpLocalPath.value = null;
       try {
@@ -32,18 +53,65 @@ watch(
           image.value.id,
           image.value.hif_path
         );
-        ptpLocalPath.value = localPath;
+        if (token === previewToken) ptpLocalPath.value = localPath;
       } catch (e) {
         console.error("Failed to download PTP preview:", e);
       } finally {
-        ptpLoading.value = false;
+        if (token === previewToken) ptpLoading.value = false;
       }
     } else {
+      previewToken++;
       ptpLocalPath.value = null;
+      ptpLoading.value = false;
     }
   },
   { immediate: true }
 );
+
+// --- PTP download progress card ---
+
+const ptpProgress = computed(() =>
+  image.value ? (store.ptpDownloadProgress.get(image.value.id) ?? null) : null
+);
+
+const ptpPercent = computed(() => {
+  const p = ptpProgress.value;
+  if (!p || p.bytes_total === 0) return 0;
+  return Math.min(100, Math.round((p.bytes_done / p.bytes_total) * 100));
+});
+
+// Transfer rate, smoothed. The camera decides when to report progress, so raw
+// deltas swing wildly between samples — an EWMA keeps the number readable
+// without lagging far behind a genuine slowdown.
+const ptpRate = ref(0);
+let lastSample: { bytes: number; at: number } | null = null;
+
+watch(ptpProgress, (p) => {
+  if (!p) {
+    ptpRate.value = 0;
+    lastSample = null;
+    return;
+  }
+  const at = performance.now();
+  if (!lastSample || p.bytes_done <= lastSample.bytes) {
+    lastSample = { bytes: p.bytes_done, at };
+    return;
+  }
+  const seconds = (at - lastSample.at) / 1000;
+  if (seconds < 0.05) return;
+  const instant = (p.bytes_done - lastSample.bytes) / seconds;
+  ptpRate.value =
+    ptpRate.value === 0 ? instant : ptpRate.value * 0.7 + instant * 0.3;
+  lastSample = { bytes: p.bytes_done, at };
+});
+
+async function cancelPtpDownload() {
+  // Drop the spinner immediately — the round-trip to the daemon and the
+  // rejection that unwinds ensurePtpPreview both lag the click.
+  ptpLoading.value = false;
+  previewToken++;
+  await store.cancelPtpDownload();
+}
 
 const imageSrc = computed(() => {
   if (!image.value) return "";
@@ -171,20 +239,40 @@ function onRating(r: number) {
         :key="'thumb-' + image.id"
       />
 
-      <!-- PTP loading indicator (shown over thumbnail) -->
-      <div v-if="ptpLoading && !thumbnailSrc" class="loading-indicator">
-        <div class="loading-spinner"></div>
-        <span>Downloading from camera...</span>
+      <!-- PTP download card. Shown over the thumbnail (not only in its
+           absence): a 4 GB clip behind a poster frame with no feedback is
+           exactly the "it looks frozen" case this replaces. -->
+      <div v-if="ptpLoading" class="ptp-download">
+        <template v-if="ptpProgress && ptpProgress.bytes_total > 0">
+          <div class="ptp-head">
+            <span class="ptp-title">Downloading from camera</span>
+            <span class="ptp-percent">{{ ptpPercent }}%</span>
+          </div>
+          <div class="ptp-bar">
+            <div class="ptp-fill" :style="{ width: ptpPercent + '%' }"></div>
+          </div>
+          <div class="ptp-meta">
+            <span>
+              {{ formatSize(ptpProgress.bytes_done) }} /
+              {{ formatSize(ptpProgress.bytes_total) }}
+            </span>
+            <span v-if="ptpRate > 0">{{ formatSize(ptpRate) }}/s</span>
+          </div>
+        </template>
+        <!-- Fallback until the first byte report lands -->
+        <template v-else>
+          <div class="loading-spinner"></div>
+          <span class="ptp-title">Downloading from camera...</span>
+        </template>
+        <button class="ptp-cancel" @click="cancelPtpDownload">Cancel</button>
       </div>
 
-      <video
+      <VideoPlayer
         v-if="imageSrc && image.media_type === 'Video'"
         :src="imageSrc"
         :poster="thumbnailSrc || undefined"
         :key="'video-' + image.id"
         class="full-video"
-        controls
-        preload="metadata"
       />
 
       <!-- Full-res image (fades in over thumbnail) -->
@@ -234,8 +322,19 @@ function onRating(r: number) {
           <span class="hint-sep">&middot;</span>
           <kbd class="key-hint-inline">&larr;&rarr;</kbd> navigate
           <span class="hint-sep">&middot;</span>
-          <kbd class="key-hint-inline">Space</kbd> next unrated
-          <template v-if="image.media_type === 'Image'">
+          <!-- On a clip the player owns Space/J/L/F/M, so advertise those
+               instead of the stills shortcuts they replace. -->
+          <template v-if="image.media_type === 'Video'">
+            <kbd class="key-hint-inline">Space</kbd> play
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">J</kbd>/<kbd class="key-hint-inline">L</kbd> seek
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">F</kbd> fullscreen
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">M</kbd> mute
+          </template>
+          <template v-else>
+            <kbd class="key-hint-inline">Space</kbd> next unrated
             <span class="hint-sep">&middot;</span>
             <kbd class="key-hint-inline">M</kbd> mark
           </template>
@@ -293,12 +392,10 @@ function onRating(r: number) {
   opacity: 1;
 }
 
+/* Video stage — VideoPlayer sizes its own <video> and control bar inside */
 .full-video {
-  max-width: 100%;
-  max-height: 100%;
   width: 100%;
   height: 100%;
-  object-fit: contain;
 }
 
 /* Subtle vignette for darkroom feel */
@@ -466,14 +563,86 @@ function onRating(r: number) {
   color: var(--color-border);
 }
 
-/* Loading indicator for PTP downloads */
-.loading-indicator {
+/* PTP download progress card — floats over the poster/thumbnail */
+.ptp-download {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 12;
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 10px;
+  min-width: 250px;
+  padding: 18px 20px;
+  border-radius: var(--radius-md);
+  background: rgba(13, 12, 10, 0.82);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ptp-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 12px;
+  width: 100%;
+}
+
+.ptp-title {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.ptp-percent {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ptp-bar {
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.ptp-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 2px;
+  transition: width var(--transition-medium);
+}
+
+.ptp-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  font-size: 10px;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ptp-cancel {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  padding: 4px 14px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.ptp-cancel:hover {
+  border-color: var(--color-border-hover);
+  color: var(--color-text-secondary);
 }
 
 .loading-spinner {

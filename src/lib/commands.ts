@@ -10,6 +10,7 @@ import type {
   SearchResult,
   ModelDownloadProgress,
   IndexProgress,
+  PtpFileProgress,
 } from "@/types";
 
 export async function scanForCameras(): Promise<CameraVolume[]> {
@@ -47,9 +48,35 @@ export async function ptpListImages(
 export async function ptpDownloadFile(
   cameraName: string,
   fileName: string,
-  destDir: string
+  destDir: string,
+  onProgress?: (progress: PtpFileProgress) => void
 ): Promise<string> {
-  return invoke("ptp_download_file", { cameraName, fileName, destDir });
+  // The channel is created even without a listener: the command signature
+  // requires it, and an unsubscribed Channel costs nothing.
+  const channel = new Channel<PtpFileProgress>();
+  if (onProgress) channel.onmessage = onProgress;
+  return invoke("ptp_download_file", {
+    cameraName,
+    fileName,
+    destDir,
+    onProgress: channel,
+  });
+}
+
+/**
+ * Abort the download currently in flight on `cameraName`. The pending
+ * `ptpDownloadFile` promise rejects. No-op if nothing is downloading.
+ */
+export async function ptpCancelDownload(cameraName: string): Promise<void> {
+  return invoke("ptp_cancel_download", { cameraName });
+}
+
+/** Evict least-recently-used entries until the cache fits. Returns bytes freed. */
+export async function prunePreviewCache(
+  cacheDir: string,
+  maxBytes: number
+): Promise<number> {
+  return invoke("prune_preview_cache", { cacheDir, maxBytes });
 }
 
 export async function ptpDeleteFiles(
@@ -63,6 +90,8 @@ export async function ptpImportFiles(
   cameraName: string,
   selections: ImportSelection[],
   destDir: string,
+  /** Preview cache to source already-downloaded files from; null to skip. */
+  previewCacheDir: string | null,
   onProgress: (progress: ImportProgress) => void
 ): Promise<void> {
   const channel = new Channel<ImportProgress>();
@@ -71,6 +100,7 @@ export async function ptpImportFiles(
     cameraName,
     selections,
     destDir,
+    previewCacheDir,
     onProgress: channel,
   });
 }

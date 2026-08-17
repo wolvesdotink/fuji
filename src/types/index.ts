@@ -28,6 +28,10 @@ export interface ImportSelection {
   hif_path: string;
   raf_path: string | null;
   rating: number | null;
+  // Known sizes, forwarded so the importer can pre-sum a byte total (PTP
+  // can't cheaply stat files mid-transfer) and validate preview-cache hits.
+  hif_size?: number;
+  raf_size?: number | null;
 }
 
 export interface ImportProgress {
@@ -44,6 +48,12 @@ export type ImportPhase =
   | "ImportingToPhotos"
   | "Verifying"
   | "Complete";
+
+/** Byte progress for a single PTP file download (viewer preview / video). */
+export interface PtpFileProgress {
+  bytes_done: number;
+  bytes_total: number;
+}
 
 export interface ThumbnailProgress {
   image_id: string;
