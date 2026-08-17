@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fuji Culler — Plan: Video Controls &amp; Loading Performance</title>
+<style>
+  :root {
+    --bg: #0d0c0a;
+    --surface: #161411;
+    --surface-2: #1e1b17;
+    --border: #2c2823;
+    --text: #e8e2d6;
+    --text-2: #a89f8f;
+    --muted: #6f675a;
+    --accent: #c4a24e;
+    --green: #7fa66a;
+    --red: #b8674f;
+    --blue: #6f93b0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 4px; }
+  .subtitle { color: var(--text-2); margin: 0 0 40px; font-size: 15px; }
+  h2 {
+    font-size: 21px; margin: 56px 0 8px; padding-top: 24px;
+    border-top: 1px solid var(--border);
+  }
+  h3 { font-size: 16px; margin: 28px 0 6px; color: var(--accent); }
+  h4 { font-size: 14px; margin: 20px 0 4px; }
+  p { margin: 8px 0; color: var(--text); }
+  .dim { color: var(--text-2); }
+  code {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px; font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  pre {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; overflow-x: auto;
+    font-size: 13px; line-height: 1.5;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-2); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  ul, ol { margin: 8px 0; padding-left: 24px; }
+  li { margin: 6px 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 22px; margin: 16px 0;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 2px 9px; border-radius: 100px; margin-right: 8px;
+    vertical-align: 2px;
+  }
+  .tag.p0 { background: rgba(184,103,79,.15); color: var(--red); border: 1px solid rgba(184,103,79,.4); }
+  .tag.p1 { background: rgba(196,162,78,.12); color: var(--accent); border: 1px solid rgba(196,162,78,.4); }
+  .tag.p2 { background: rgba(111,147,176,.12); color: var(--blue); border: 1px solid rgba(111,147,176,.4); }
+  .tag.win { background: rgba(127,166,106,.12); color: var(--green); border: 1px solid rgba(127,166,106,.4); }
+  .effort { float: right; color: var(--muted); font-size: 12px; font-weight: 600; }
+  kbd {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px;
+    font-size: 12px; font-family: inherit; font-weight: 600;
+  }
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 24px; }
+  .toc a { color: var(--text-2); text-decoration: none; }
+  .toc a:hover { color: var(--accent); }
+  .toc ol { margin: 4px 0; }
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--surface);
+    padding: 12px 18px; border-radius: 0 8px 8px 0; margin: 16px 0;
+  }
+  .callout.warn { border-left-color: var(--red); }
+  .path { color: var(--blue); font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Video Controls &amp; Loading Performance</h1>
+<p class="subtitle">Implementation plan for Fuji Culler · based on code audit of <code>main</code> @ <code>49982b3</code> · August 17, 2026</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#state">Where we are today (code audit)</a></li>
+    <li><a href="#root">Why the video download “took forever”</a></li>
+    <li><a href="#phase1">Phase 1 — PTP session &amp; catalog reuse (the big win)</a></li>
+    <li><a href="#phase2">Phase 2 — Real download progress (bytes, rate, ETA, cancel)</a></li>
+    <li><a href="#phase3">Phase 3 — Video player controls</a></li>
+    <li><a href="#phase4">Phase 4 — Smaller performance wins</a></li>
+    <li><a href="#phase5">Phase 5 — Stretch goals</a></li>
+    <li><a href="#order">Suggested order, effort &amp; acceptance criteria</a></li>
+    <li><a href="#risks">Risks &amp; open questions</a></li>
+  </ol>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="state">1 · Where we are today (code audit)</h2>
+
+<h3>Video playback</h3>
+<ul>
+  <li>Both viewers already render a native player: <span class="path">src/components/ImageViewer.vue:180</span> and <span class="path">src/components/LibraryViewer.vue:130</span> use <code>&lt;video controls preload="metadata"&gt;</code> with the cached thumbnail as poster. So basic controls <em>exist</em> — the problems are around them:</li>
+  <li><strong>Keyboard shortcuts fight the player.</strong> The global handler (<span class="path">src/composables/useKeyboardNav.ts:16</span>) only yields when <code>e.target</code> is the <code>&lt;video&gt;</code> element itself — i.e. only after the user has clicked the native controls. In the normal case (arrived via <kbd>←</kbd>/<kbd>→</kbd>, video not focused) pressing <kbd>Space</kbd> jumps to the next unrated image and the arrow keys navigate away mid-playback. There is no way to play/pause, seek, or change volume from the keyboard.</li>
+  <li><strong>No player state persistence.</strong> Volume/mute reset on every clip; no loop, no playback speed, no fullscreen shortcut, no frame stepping — all useful when culling clips.</li>
+  <li><strong>PTP videos block on a silent full download.</strong> Over PTP, <code>ensurePtpPreview</code> (<span class="path">src/stores/gallery.ts:534</span>) must download the <em>entire</em> movie before the <code>&lt;video&gt;</code> even gets a <code>src</code>. The UI shows only a spinner with “Downloading from camera…” (<span class="path">ImageViewer.vue:175</span>) — no percentage, no transfer rate, no cancel. A 4&nbsp;GB clip at typical PTP throughput (~25–35&nbsp;MB/s) is a 2+ minute blank stare.</li>
+</ul>
+
+<h3>Download / import pipeline</h3>
+<ul>
+  <li><strong>Every PTP download request re-opens a session and re-waits for the catalog.</strong> <code>handleDaemonDownload</code> (<span class="path">src-tauri/swift/ptp_bridge.swift:818</span>) runs <code>openSession → waitForCatalog → download → closeSession</code> per request. <code>waitForCatalog</code> blocks until <code>contentCatalogPercentCompleted == 100</code> — the gallery store’s own comment (<span class="path">src/stores/gallery.ts:43</span>) notes a full-card catalog takes ~45&nbsp;s. Since <em>each single-file preview download while culling</em> is its own request, the user can pay that session/catalog tax over and over.</li>
+  <li><strong>PTP progress is per-file only; bytes are never reported.</strong> The daemon emits one progress line per <em>completed</em> file; the Rust side forwards <code>bytes_copied: 0, bytes_total: 0</code> (<span class="path">src-tauri/src/commands/import.rs:321</span>). The import screen already computes rate + ETA from bytes and falls back to an indeterminate bar when they’re zero (<span class="path">src/components/ImportProgress.vue:48,96</span>) — so during a video-heavy PTP import the bar sits indeterminate for minutes. “It’s slow” and “it looks frozen” are compounding here.</li>
+  <li><strong>Busy-wait polling adds fixed latency per operation.</strong> <code>downloadFile</code>, <code>openSession</code>, <code>closeSession</code> all spin the run loop in 100&nbsp;ms slices (<span class="path">ptp_bridge.swift:242,139,181</span>). Average ~50&nbsp;ms wasted per wait × several waits per file × hundreds of files.</li>
+  <li><strong>Apple Photos import sleeps 2 s per batch of 15</strong> (<span class="path">src-tauri/src/commands/import.rs:441</span>): a 300-file import spends 40&nbsp;s just in <code>delay 2</code>.</li>
+  <li><strong>Preview cache is thrown away at import time.</strong> Files already downloaded to <code>~/.cache/fuji-culler/ptp-preview</code> during culling (potentially including that huge video you just watched) are downloaded from the camera <em>again</em> by the import. The cache is also never pruned.</li>
+  <li><strong>Mass-storage copy is fine.</strong> The 8&nbsp;MB chunked copy with throttled progress (<span class="path">import.rs:14–20</span>) is close to USB-reader line speed; not a bottleneck.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="root">2 · Why the video download “took forever”</h2>
+
+<div class="card">
+<p>For one PTP video, the wall-clock today is roughly:</p>
+<pre><code>open session (~1–3 s)
++ wait for catalog (up to ~45 s on a full card — even if it already completed once)
++ transfer (file size ÷ ~25–35 MB/s PTP throughput)
++ close session (~0.5–1 s)
+… with zero visible progress the whole time.</code></pre>
+<p>The transfer itself is bounded by the camera’s PTP implementation — we can’t make the wire faster. But the <strong>session + catalog overhead is pure waste we can eliminate</strong> (Phase 1), and the <strong>perceived</strong> slowness is largely the missing progress feedback (Phase 2). For truly huge offloads, the honest answer is also to steer the user toward mass-storage/card-reader mode (Phase 4).</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="phase1">3 · Phase 1 — PTP session &amp; catalog reuse <span class="tag p0">P0</span><span class="tag win">biggest win</span></h2>
+<p class="dim">All changes in <span class="path">src-tauri/swift/ptp_bridge.swift</span>; no Rust/TS API changes required.</p>
+
+<h4>1.1 Keep the session open across daemon requests</h4>
+<ul>
+  <li>Add per-camera session state to the daemon (<code>sessionOpen: Bool</code> keyed alongside <code>daemonCameras</code>). <code>handleDaemonDownload</code> / <code>handleDaemonCatalog</code> / <code>handleDaemonDelete</code> call a new <code>ensureSession(camera)</code> instead of unconditionally <code>openSession</code>, and <strong>stop closing the session at the end of each request</strong>.</li>
+  <li>Close the session only when: the camera is removed (<code>deviceBrowser(_:didRemove:)</code>), the daemon shuts down, or an idle timer fires (e.g. 60&nbsp;s with no requests — keeps the camera from being locked forever and lets it sleep).</li>
+  <li>Keep the existing “wait for close before replying” behavior when a delete follows an import — <code>ensureSession</code> after an explicit close already handles the reconnect.</li>
+</ul>
+
+<h4>1.2 Cache catalog readiness per session</h4>
+<ul>
+  <li>Track <code>catalogReady</code> per camera, set by <code>deviceDidBecomeReady(withCompleteContentCatalog:)</code> / the polling fallback, cleared on session close or camera removal. <code>waitForCatalog</code> returns immediately when already ready.</li>
+  <li>Result: the first interaction after connect pays the catalog wait once; every preview and import download after that starts transferring immediately.</li>
+</ul>
+
+<h4>1.3 Replace polling waits with callback-driven wakeups</h4>
+<ul>
+  <li>In the delegate callbacks (<code>didDownloadFile</code>, <code>didOpenSession…</code>, <code>didCloseSession…</code>), call <code>CFRunLoopStop(CFRunLoopGetMain())</code> so the <code>RunLoop.main.run(until:)</code> waits return the moment the event lands, instead of on the next 100&nbsp;ms tick. Keep the deadline loop as a timeout backstop.</li>
+</ul>
+
+<div class="callout">
+<strong>Expected impact:</strong> single-file preview/video downloads go from <em>seconds-to-minutes of overhead + transfer</em> to <em>transfer time only</em> after the first request. This is the fix for “it just took forever to download the video.”
+</div>
+
+<!-- ================================================================ -->
+<h2 id="phase2">4 · Phase 2 — Real download progress: bytes, rate, ETA, cancel <span class="tag p0">P0</span></h2>
+
+<h4>2.1 Byte-level progress from the Swift bridge</h4>
+<ul>
+  <li>Implement the optional <code>ICCameraDeviceDownloadDelegate</code> method <code>didReceiveDownloadProgress(for:downloadedBytes:maxBytes:)</code> and forward it into the existing NDJSON progress stream, throttled to ~100&nbsp;ms:
+  <pre><code>{"id":7,"event":"progress","completed":3,"total":24,
+ "name":"DSCF0042.MOV","bytes_done":812646400,"bytes_file":4294967296}</code></pre></li>
+  <li>Compute cumulative totals on the Rust side: extend <code>PtpDownloadProgress</code> (<span class="path">src-tauri/src/camera/ptp.rs:68</span>) with optional byte fields; in <code>ptp_import_files_blocking</code> pre-sum <code>bytes_total</code> from the selections (sizes are already in the catalog / <code>ImagePair.hif_size</code>) and fill <code>bytes_copied</code> in the forwarded <code>ImportProgress</code>.</li>
+  <li><strong>No UI work needed for the import screen</strong> — <span class="path">ImportProgress.vue</span> already renders bytes, rate and ETA the moment the numbers are non-zero.</li>
+</ul>
+
+<h4>2.2 Progress + cancel for in-viewer PTP downloads</h4>
+<ul>
+  <li>Route <code>ptp_download_file</code> (<span class="path">src-tauri/src/commands/camera.rs:471</span>) through <code>download_with_progress</code> and add a Tauri <code>Channel</code> parameter so the viewer can subscribe.</li>
+  <li>Replace the bare spinner in <span class="path">ImageViewer.vue:175</span> with a small progress card: percentage, downloaded/total MB, transfer rate, and a Cancel button. Cancel via a new daemon <code>cancel</code> command that calls <code>ICCameraDevice.cancelDownload()</code>, plus navigation-away cancels the in-flight request for the old file.</li>
+  <li>Keep the existing dedup in <code>ensurePtpPreview</code>; store per-image progress in a small reactive map in the gallery store.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="phase3">5 · Phase 3 — Video player controls <span class="tag p1">P1</span></h2>
+
+<h4>3.1 New shared <code>VideoPlayer.vue</code> component</h4>
+<p>Extract the two near-identical <code>&lt;video&gt;</code> blocks (camera <span class="path">ImageViewer.vue</span>, library <span class="path">LibraryViewer.vue</span>) into one component with custom controls styled to the existing darkroom UI (same tokens: <code>--color-surface</code>, <code>--color-accent</code>, backdrop-blur bar like <code>.nav-btn</code>):</p>
+<ul>
+  <li>Play/pause button + click-on-video toggles + center flash icon on toggle.</li>
+  <li>Seek bar with buffered-ranges shading, time elapsed / duration (<code>tabular-nums</code>), hover time tooltip.</li>
+  <li>Volume slider + mute, <strong>persisted to <code>localStorage</code></strong> so every clip doesn’t reset to 100%.</li>
+  <li>Playback rate menu (0.5× / 1× / 1.5× / 2×), loop toggle, fullscreen button.</li>
+  <li>Auto-hide controls after ~2 s of no pointer movement during playback (like the nav arrows’ hover behavior).</li>
+  <li>Keep the native <code>controls</code> attribute as a fallback prop in case of regressions; poster/thumbnail behavior unchanged.</li>
+</ul>
+
+<h4>3.2 Video-aware keyboard map</h4>
+<p>In <span class="path">useKeyboardNav.ts</span>, when the current item is a video (check <code>currentImage.media_type</code> — no reliance on focus), route keys to the player via the gallery/library store or a provided player ref:</p>
+<table>
+  <tr><th>Key</th><th>On a video</th><th>Rationale</th></tr>
+  <tr><td><kbd>Space</kbd></td><td>Play / pause</td><td>Universal expectation; “next unrated” moves to <kbd>N</kbd> while on a video</td></tr>
+  <tr><td><kbd>←</kbd> / <kbd>→</kbd></td><td>Still navigate prev/next item</td><td>Culling flow stays primary; seeking gets its own keys</td></tr>
+  <tr><td><kbd>J</kbd> / <kbd>L</kbd></td><td>Seek −5 s / +5 s</td><td>Familiar from editors; no conflicts</td></tr>
+  <tr><td><kbd>K</kbd></td><td>Play / pause (alt)</td><td>J/K/L convention</td></tr>
+  <tr><td><kbd>,</kbd> / <kbd>.</kbd></td><td>Frame step when paused</td><td>Judging sharpness on clips</td></tr>
+  <tr><td><kbd>F</kbd></td><td>Fullscreen toggle</td><td>—</td></tr>
+  <tr><td><kbd>1</kbd>–<kbd>5</kbd>, <kbd>0</kbd></td><td>Rate as today</td><td>Rating must never be hijacked</td></tr>
+  <tr><td><kbd>M</kbd></td><td>Mute</td><td>Safe: <code>toggleMarkForCompare</code> already no-ops for videos (<span class="path">gallery.ts:377</span>)</td></tr>
+</table>
+<ul>
+  <li>Pause (or keep-playing-muted — decide in review) the video automatically when navigating away, so audio never bleeds into the next item.</li>
+  <li>Update the hint bar in the viewer footer to show the video key hints when a video is displayed.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="phase4">6 · Phase 4 — Smaller performance wins <span class="tag p1">P1</span></h2>
+
+<h4>4.1 Reuse the preview cache at import time</h4>
+<ul>
+  <li>In <code>ptp_import_files_blocking</code>: before downloading, check <code>~/.cache/fuji-culler/ptp-preview</code> for each file; if present with the expected size, copy locally instead of re-downloading from the camera. A video watched during culling then imports at disk speed.</li>
+</ul>
+
+<h4>4.2 Prune the PTP preview cache</h4>
+<ul>
+  <li>LRU cap (e.g. 2&nbsp;GB, configurable) enforced on app start and after each download — right now watched videos accumulate in the cache forever.</li>
+</ul>
+
+<h4>4.3 Trim the Apple Photos import delay</h4>
+<ul>
+  <li>Drop <code>delay 2</code> to <code>delay 0.5</code> for batches after the first (Photos is already activated), or activate once up front and remove the per-batch delay entirely. Saves ~2 s × (batches − 1).</li>
+</ul>
+
+<h4>4.4 Be honest about PTP limits for big video offloads</h4>
+<ul>
+  <li>Log measured MB/s per file (bridge stderr already funnels into the app log) so we can tell protocol overhead from wire speed.</li>
+  <li>When an import selection contains &gt; N&nbsp;GB of video over PTP, show a one-line hint with the ETA and a note that a card reader (mass-storage mode) is several times faster. Cheap, prevents the worst experience.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="phase5">7 · Phase 5 — Stretch goals <span class="tag p2">P2</span></h2>
+<ul>
+  <li><strong>Play-while-downloading for PTP videos.</strong> Stream via <code>requestReadDataOfFile(_:atOffset:length:…)</code> into the cache file and start playback once enough is buffered. <em>Caveat:</em> only works when the <code>moov</code> atom is at the front of the file; Fuji MOVs typically put it at the end, so probe first and fall back to download-then-play. Only worth it after Phases 1–2 prove insufficient.</li>
+  <li><strong>Hover-scrub video thumbnails in the grid</strong> (generate a sprite strip during thumbnailing).</li>
+  <li><strong>Audio level meter / waveform strip</strong> under the seek bar for quickly spotting dead takes.</li>
+</ul>
+
+<!-- ================================================================ -->
+<h2 id="order">8 · Suggested order, effort &amp; acceptance criteria</h2>
+<table>
+  <tr><th>#</th><th>Work item</th><th>Effort</th><th>Done when…</th></tr>
+  <tr><td>1</td><td>Phase 1 — session/catalog reuse + callback wakeups</td><td>~1 day</td><td>Second and later preview downloads start transferring in &lt; 1 s (log-verified); import no longer re-waits catalog</td></tr>
+  <tr><td>2</td><td>Phase 2.1 — byte progress through daemon → Rust → import UI</td><td>~½ day</td><td>PTP import shows live MB, rate and ETA; bar never indeterminate during downloads</td></tr>
+  <tr><td>3</td><td>Phase 2.2 — viewer download progress + cancel</td><td>~½ day</td><td>Opening a PTP video shows % + MB/s + Cancel; navigating away cancels</td></tr>
+  <tr><td>4</td><td>Phase 3 — VideoPlayer component + keyboard map</td><td>~1–1½ days</td><td>Space/J/K/L/F/M work with the video unfocused; 1–5 still rates; volume persists; both viewers use the shared component</td></tr>
+  <tr><td>5</td><td>Phase 4 — cache reuse, pruning, Photos delay, PTP hint</td><td>~½–1 day</td><td>Previously previewed files import without camera traffic; cache bounded; measured import wall-clock drops</td></tr>
+</table>
+<p class="dim">Phases 1 and 2 are independent of Phase 3 and can ship separately. Each phase is a reviewable PR on its own.</p>
+
+<!-- ================================================================ -->
+<h2 id="risks">9 · Risks &amp; open questions</h2>
+<ul>
+  <li><strong>Long-lived PTP sessions:</strong> some Fuji bodies may drop or misbehave on idle sessions (battery/sleep). Mitigated by the idle-close timer and the existing respawn/reconnect path; needs testing on the actual camera model(s) in use.</li>
+  <li><strong>Delete-after-import ordering:</strong> today the close-before-reply dance protects deletes on “some Fuji bodies” (<span class="path">ptp_bridge.swift:171</span>). With persistent sessions, verify delete still works with the session held open — if not, close/reopen specifically around deletes.</li>
+  <li><strong><code>didReceiveDownloadProgress</code> granularity</strong> varies by device; if the camera reports coarsely, rate/ETA smoothing (EWMA over ~5 s) keeps the numbers stable.</li>
+  <li><strong>Keyboard remap on videos</strong> changes muscle memory slightly (<kbd>Space</kbd> no longer “next unrated” on a clip). The footer hint bar mitigates; worth a quick self-test before settling the final map.</li>
+  <li><strong>Open question:</strong> should videos auto-play on open in the viewer? (Suggested default: yes, muted-off, since the user navigated there deliberately.)</li>
+</ul>
+
+</div>
+</body>
+</html>
