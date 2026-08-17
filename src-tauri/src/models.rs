@@ -48,6 +48,13 @@ pub struct ImportSelection {
     pub hif_path: String,
     pub raf_path: Option<String>,
     pub rating: Option<u8>,
+    /// Catalog sizes, carried through from `ImagePair`. A PTP import uses them
+    /// to decide whether a file already sitting in the preview cache is the
+    /// same file — a size mismatch (or an unknown size) means re-download.
+    #[serde(default)]
+    pub hif_size: Option<u64>,
+    #[serde(default)]
+    pub raf_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +65,16 @@ pub struct ImportProgress {
     pub bytes_copied: u64,
     pub bytes_total: u64,
     pub phase: ImportPhase,
+}
+
+/// Byte progress of a single in-viewer PTP download, streamed to the frontend
+/// over a Tauri channel so a big movie shows a percentage and rate instead of a
+/// bare spinner. `bytes_total` comes from the camera catalog, so it is known
+/// before the first byte arrives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtpFileProgress {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

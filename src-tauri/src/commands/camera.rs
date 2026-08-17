@@ -3,12 +3,15 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use serde::Serialize;
+use tauri::ipc::Channel;
 use tauri::State;
 use walkdir::WalkDir;
 
 use crate::camera::ptp;
 use crate::index;
-use crate::models::{CameraSourceType, CameraVolume, ImagePair, IndexFingerprint, MediaType};
+use crate::models::{
+    CameraSourceType, CameraVolume, ImagePair, IndexFingerprint, MediaType, PtpFileProgress,
+};
 
 const IMAGE_EXTENSIONS: &[&str] = &["HIF", "HEIF", "HEIC", "JPG", "JPEG"];
 const VIDEO_EXTENSIONS: &[&str] = &["MOV", "MP4", "M4V", "AVI"];
@@ -467,16 +470,35 @@ pub async fn ptp_list_images(
 
 /// Download a file from a PTP camera to a local cache directory.
 /// Returns the local file path.
+///
+/// Byte progress is streamed on `on_progress` so the viewer can show a
+/// percentage, a transfer rate and a Cancel button while a multi-gigabyte movie
+/// comes across the wire.
 #[tauri::command]
 pub async fn ptp_download_file(
     bridge: State<'_, Arc<ptp::PtpBridge>>,
     camera_name: String,
     file_name: String,
     dest_dir: String,
+    on_progress: Channel<PtpFileProgress>,
 ) -> Result<String, String> {
     let bridge = bridge.inner().clone();
     tokio::task::spawn_blocking(move || {
-        let result = bridge.download(&camera_name, &dest_dir, &[file_name.clone()])?;
+        // A single-file batch, so the daemon's cumulative batch bytes are this
+        // file's bytes and map straight onto the channel.
+        let result = bridge.download_with_progress(
+            &camera_name,
+            &dest_dir,
+            std::slice::from_ref(&file_name),
+            move |p| {
+                if let (Some(bytes_done), Some(bytes_total)) = (p.bytes_done, p.bytes_total) {
+                    let _ = on_progress.send(PtpFileProgress {
+                        bytes_done,
+                        bytes_total,
+                    });
+                }
+            },
+        )?;
 
         if let Some(downloaded) = result.downloaded.first() {
             Ok(downloaded.path.clone())
@@ -491,6 +513,22 @@ pub async fn ptp_download_file(
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Cancel the PTP download in flight on a camera.
+///
+/// The cancelled `ptp_download_file` call fails with the camera's cancellation
+/// error rather than returning a path, so the caller does not need to race this
+/// command against its own result.
+#[tauri::command]
+pub async fn ptp_cancel_download(
+    bridge: State<'_, Arc<ptp::PtpBridge>>,
+    camera_name: String,
+) -> Result<(), String> {
+    let bridge = bridge.inner().clone();
+    tokio::task::spawn_blocking(move || bridge.cancel(&camera_name))
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Delete files from a PTP camera.

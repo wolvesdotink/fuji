@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +18,37 @@ const COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB buffer
 /// (deserialize + reactive update on the webview main thread) per 8MB chunk,
 /// thousands over a big import. File boundaries always emit regardless.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Copy one file in `COPY_BUFFER_SIZE` chunks, reporting each chunk's size to
+/// `on_bytes` as it lands. Chunked rather than `fs::copy` so the caller can keep
+/// the progress bar moving through a multi-gigabyte file.
+fn copy_file_chunked<F: FnMut(u64)>(
+    src: &Path,
+    dst: &Path,
+    mut on_bytes: F,
+) -> Result<(), String> {
+    let mut src_file = fs::File::open(src)
+        .map_err(|e| format!("Failed to open source file {}: {}", src.display(), e))?;
+    let mut dst_file = fs::File::create(dst)
+        .map_err(|e| format!("Failed to create destination file {}: {}", dst.display(), e))?;
+
+    let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
+    loop {
+        let bytes_read = src_file
+            .read(&mut buffer)
+            .map_err(|e| format!("Read error on {}: {}", src.display(), e))?;
+
+        if bytes_read == 0 {
+            return Ok(());
+        }
+
+        dst_file
+            .write_all(&buffer[..bytes_read])
+            .map_err(|e| format!("Write error on {}: {}", dst.display(), e))?;
+
+        on_bytes(bytes_read as u64);
+    }
+}
 
 /// Copy selected files to the destination directory with progress reporting.
 ///
@@ -98,28 +129,8 @@ fn import_files_blocking(
             phase: ImportPhase::CopyingToLaCie,
         });
 
-        // Chunked copy with progress
-        let mut src_file = fs::File::open(src)
-            .map_err(|e| format!("Failed to open source file {}: {}", source_path, e))?;
-
-        let mut dst_file = fs::File::create(&dst)
-            .map_err(|e| format!("Failed to create destination file {}: {}", dest_filename, e))?;
-
-        let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
-        loop {
-            let bytes_read = src_file
-                .read(&mut buffer)
-                .map_err(|e| format!("Read error on {}: {}", source_path, e))?;
-
-            if bytes_read == 0 {
-                break;
-            }
-
-            dst_file
-                .write_all(&buffer[..bytes_read])
-                .map_err(|e| format!("Write error on {}: {}", dest_filename, e))?;
-
-            bytes_copied += bytes_read as u64;
+        copy_file_chunked(src, &dst, |chunk| {
+            bytes_copied += chunk;
 
             if last_progress.elapsed() >= PROGRESS_INTERVAL {
                 last_progress = Instant::now();
@@ -132,7 +143,7 @@ fn import_files_blocking(
                     phase: ImportPhase::CopyingToLaCie,
                 });
             }
-        }
+        })?;
 
         // File boundary: always emit so the files counter and bar never lag
         // behind a completed file, even inside the throttle window.
@@ -244,6 +255,10 @@ fn import_files_blocking(
 /// Import files from a PTP camera.
 /// Downloads files via ptp-bridge, then imports to Apple Photos.
 ///
+/// `preview_cache_dir` is the directory the viewer downloads PTP previews into
+/// while culling. Anything already there is copied locally instead of being
+/// pulled off the camera a second time.
+///
 /// Async wrapper so the blocking download + osascript calls run on a dedicated
 /// thread instead of Tauri's main thread.
 #[tauri::command]
@@ -252,11 +267,19 @@ pub async fn ptp_import_files(
     camera_name: String,
     selections: Vec<ImportSelection>,
     dest_dir: String,
+    preview_cache_dir: Option<String>,
     on_progress: Channel<ImportProgress>,
 ) -> Result<(), String> {
     let bridge = bridge.inner().clone();
     tokio::task::spawn_blocking(move || {
-        ptp_import_files_blocking(bridge, camera_name, selections, dest_dir, on_progress)
+        ptp_import_files_blocking(
+            bridge,
+            camera_name,
+            selections,
+            dest_dir,
+            preview_cache_dir,
+            on_progress,
+        )
     })
     .await
     .map_err(|e| format!("Import task join error: {}", e))?
@@ -267,37 +290,73 @@ fn ptp_import_files_blocking(
     camera_name: String,
     selections: Vec<ImportSelection>,
     dest_dir: String,
+    preview_cache_dir: Option<String>,
     on_progress: Channel<ImportProgress>,
 ) -> Result<(), String> {
     let dest = Path::new(&dest_dir);
     fs::create_dir_all(dest)
         .map_err(|e| format!("Failed to create destination directory: {}", e))?;
 
-    // Collect all file names to download
-    let mut files_to_download: Vec<String> = Vec::new();
+    // Collect all file names to fetch, each with its catalog size (when the
+    // frontend knew one) so the preview cache can be validated below.
+    let mut wanted: Vec<(String, Option<u64>)> = Vec::new();
 
     for selection in &selections {
         match selection.choice {
             SelectionChoice::Skip => continue,
             SelectionChoice::HeifOnly => {
                 if let Some((_, file_name)) = ptp::parse_ptp_path(&selection.hif_path) {
-                    files_to_download.push(file_name);
+                    wanted.push((file_name, selection.hif_size));
                 }
             }
             SelectionChoice::HeifAndRaw => {
                 if let Some((_, file_name)) = ptp::parse_ptp_path(&selection.hif_path) {
-                    files_to_download.push(file_name);
+                    wanted.push((file_name, selection.hif_size));
                 }
                 if let Some(ref raf_path) = selection.raf_path {
                     if let Some((_, file_name)) = ptp::parse_ptp_path(raf_path) {
-                        files_to_download.push(file_name);
+                        wanted.push((file_name, selection.raf_size));
                     }
                 }
             }
         }
     }
 
-    let files_total = files_to_download.len() as u32;
+    let files_total = wanted.len() as u32;
+
+    // Split the batch: files already in the preview cache from culling are
+    // copied at disk speed, the rest come off the camera. Only a byte-exact size
+    // match counts as the same file — an unknown size is never trusted, since a
+    // truncated or stale cache entry would silently corrupt the import.
+    let cache_dir = preview_cache_dir.as_deref().map(Path::new);
+    let mut from_cache: Vec<(String, PathBuf)> = Vec::new();
+    let mut from_camera: Vec<String> = Vec::new();
+    let mut bytes_total: u64 = 0;
+
+    for (file_name, size) in &wanted {
+        bytes_total += size.unwrap_or(0);
+
+        if let (Some(dir), Some(expected)) = (cache_dir, *size) {
+            let cached = dir.join(file_name);
+            let usable = fs::metadata(&cached)
+                .map(|m| m.is_file() && m.len() == expected)
+                .unwrap_or(false);
+            if usable {
+                from_cache.push((file_name.clone(), cached));
+                continue;
+            }
+        }
+
+        from_camera.push(file_name.clone());
+    }
+
+    if !from_cache.is_empty() {
+        log::info!(
+            "PTP import: {} of {} files served from the preview cache",
+            from_cache.len(),
+            wanted.len()
+        );
+    }
 
     // Report start
     let _ = on_progress.send(ImportProgress {
@@ -305,43 +364,108 @@ fn ptp_import_files_blocking(
         files_completed: 0,
         files_total,
         bytes_copied: 0,
-        bytes_total: 0,
+        bytes_total,
         phase: ImportPhase::CopyingToLaCie,
     });
 
-    // Download all files in one batch via ptp-bridge. The daemon streams a
-    // progress event as each file finishes, which we forward to the UI so the
-    // counter climbs in real time instead of jumping from 0 to full at the end.
-    let progress_channel = on_progress.clone();
-    let result = bridge.download_with_progress(
-        &camera_name,
-        &dest_dir,
-        &files_to_download,
-        move |p| {
-            let _ = progress_channel.send(ImportProgress {
-                current_file: p.name,
-                files_completed: p.completed,
-                files_total,
-                bytes_copied: 0,
-                bytes_total: 0,
-                phase: ImportPhase::CopyingToLaCie,
-            });
-        },
-    )?;
+    // (camera file name, path in dest) for everything that reaches the
+    // destination, cache copies first and then camera downloads, so the Photos
+    // hand-off below sees the full set.
+    let mut imported: Vec<(String, String)> = Vec::new();
+    let mut bytes_copied: u64 = 0;
+    let mut last_progress = Instant::now();
 
-    if !result.errors.is_empty() {
-        log::warn!("PTP download errors: {:?}", result.errors);
+    for (file_name, cached_path) in &from_cache {
+        let dst = dest.join(file_name);
+        let files_completed = imported.len() as u32;
+
+        let _ = on_progress.send(ImportProgress {
+            current_file: file_name.clone(),
+            files_completed,
+            files_total,
+            bytes_copied,
+            bytes_total,
+            phase: ImportPhase::CopyingToLaCie,
+        });
+
+        let bytes_before = bytes_copied;
+        let copied = copy_file_chunked(cached_path, &dst, |chunk| {
+            bytes_copied += chunk;
+            if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                last_progress = Instant::now();
+                let _ = on_progress.send(ImportProgress {
+                    current_file: file_name.clone(),
+                    files_completed,
+                    files_total,
+                    bytes_copied,
+                    bytes_total,
+                    phase: ImportPhase::CopyingToLaCie,
+                });
+            }
+        });
+
+        match copied {
+            Ok(()) => imported.push((file_name.clone(), dst.to_string_lossy().to_string())),
+            Err(e) => {
+                // The cache is an optimisation, never a requirement: fall back
+                // to the camera and roll the byte counter back so progress
+                // doesn't double-count this file.
+                log::warn!("Preview cache copy failed for {}, using the camera: {}", file_name, e);
+                bytes_copied = bytes_before;
+                from_camera.push(file_name.clone());
+            }
+        }
     }
 
-    let downloaded_count = result.downloaded.len() as u32;
+    // Download the remainder in one batch via ptp-bridge. The daemon streams
+    // cumulative byte progress plus a line per finished file, which we offset by
+    // what the cache already provided so the UI's rate and ETA stay honest.
+    if !from_camera.is_empty() {
+        let base_files = imported.len() as u32;
+        let base_bytes = bytes_copied;
+        let progress_channel = on_progress.clone();
+        let result = bridge.download_with_progress(
+            &camera_name,
+            &dest_dir,
+            &from_camera,
+            move |p| {
+                let _ = progress_channel.send(ImportProgress {
+                    current_file: p.name,
+                    files_completed: base_files + p.completed,
+                    files_total,
+                    bytes_copied: base_bytes + p.bytes_done.unwrap_or(0),
+                    // The daemon's total is authoritative for its own batch; the
+                    // selection sizes are only a seed for the first line.
+                    bytes_total: p
+                        .bytes_total
+                        .map(|t| base_bytes + t)
+                        .unwrap_or(bytes_total),
+                    phase: ImportPhase::CopyingToLaCie,
+                });
+            },
+        )?;
+
+        if !result.errors.is_empty() {
+            log::warn!("PTP download errors: {:?}", result.errors);
+        }
+
+        imported.extend(
+            result
+                .downloaded
+                .into_iter()
+                .map(|f| (f.name, f.path)),
+        );
+    }
+
+    let downloaded_count = imported.len() as u32;
 
     // Report download complete
     let _ = on_progress.send(ImportProgress {
         current_file: format!("Downloaded {} files", downloaded_count),
         files_completed: downloaded_count,
         files_total,
-        bytes_copied: 0,
-        bytes_total: 0,
+        bytes_copied: bytes_total,
+        bytes_total,
         phase: ImportPhase::CopyingToLaCie,
     });
 
@@ -376,11 +500,10 @@ fn ptp_import_files_blocking(
     // Import rendered stills and original movies to Apple Photos. RAF files
     // remain in the destination library but Photos receives only media it can
     // display directly.
-    let photos_dest_paths: Vec<String> = result
-        .downloaded
+    let photos_dest_paths: Vec<String> = imported
         .iter()
-        .filter(|f| {
-            let upper = f.name.to_uppercase();
+        .filter(|(name, _)| {
+            let upper = name.to_uppercase();
             upper.ends_with(".HIF")
                 || upper.ends_with(".HEIF")
                 || upper.ends_with(".HEIC")
@@ -391,7 +514,7 @@ fn ptp_import_files_blocking(
                 || upper.ends_with(".M4V")
                 || upper.ends_with(".AVI")
         })
-        .map(|f| f.path.clone())
+        .map(|(_, path)| path.clone())
         .collect();
 
     if !photos_dest_paths.is_empty() {
@@ -399,8 +522,8 @@ fn ptp_import_files_blocking(
             current_file: "Importing to Apple Photos...".to_string(),
             files_completed: files_total,
             files_total,
-            bytes_copied: 0,
-            bytes_total: 0,
+            bytes_copied: bytes_total,
+            bytes_total,
             phase: ImportPhase::ImportingToPhotos,
         });
 
@@ -412,8 +535,8 @@ fn ptp_import_files_blocking(
         current_file: "Complete!".to_string(),
         files_completed: files_total,
         files_total,
-        bytes_copied: 0,
-        bytes_total: 0,
+        bytes_copied: bytes_total,
+        bytes_total,
         phase: ImportPhase::Complete,
     });
 
@@ -424,6 +547,15 @@ fn ptp_import_files_blocking(
 /// Batches files in groups to avoid AppleScript timeouts.
 fn import_to_apple_photos(file_paths: &[String]) -> Result<(), String> {
     const BATCH_SIZE: usize = 15;
+
+    if file_paths.is_empty() {
+        return Ok(());
+    }
+
+    // Launch Photos once and give it time to open its library. This used to be
+    // an `activate` + `delay 2` inside every batch script, which cost 2s per 15
+    // files — 40s of pure waiting on a 300-file import.
+    activate_apple_photos();
 
     for batch in file_paths.chunks(BATCH_SIZE) {
         let file_refs: Vec<String> = batch
@@ -437,8 +569,6 @@ fn import_to_apple_photos(file_paths: &[String]) -> Result<(), String> {
             r#"
             set fileList to {{{}}}
             tell application "Photos"
-                activate
-                delay 2
                 import fileList
             end tell
             "#,
@@ -460,4 +590,27 @@ fn import_to_apple_photos(file_paths: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Bring Photos up before the first import batch. A failure here is not fatal —
+/// the import scripts that follow will launch Photos implicitly, they just may
+/// have to wait for it.
+fn activate_apple_photos() {
+    let script = r#"
+        tell application "Photos"
+            activate
+            delay 2
+        end tell
+    "#;
+
+    match Command::new("osascript").arg("-e").arg(script).output() {
+        Ok(output) if !output.status.success() => {
+            log::warn!(
+                "Failed to activate Apple Photos: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(e) => log::warn!("Failed to run osascript to activate Apple Photos: {}", e),
+        _ => {}
+    }
 }
