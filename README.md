@@ -172,3 +172,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+### Fonts
+
+The app bundles two typefaces, both under the [SIL Open Font License 1.1](https://openfontlicense.org):
+
+- [Outfit](https://github.com/Outfitio/Outfit-Fonts), Copyright 2021 The Outfit Project Authors
+- [Syne](https://gitlab.com/bonjour-monde/fonderie/syne-typeface), Copyright 2019 The Syne Project Authors
+
+The font files come from the `@fontsource-variable` packages. Their license texts ship with the app in `licenses/` (source: [`public/licenses/`](public/licenses/)).
