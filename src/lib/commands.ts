@@ -5,6 +5,7 @@ import type {
   ImportSelection,
   ImportProgress,
   ThumbnailBatch,
+  ThumbnailResult,
   AppConfig,
   LibraryImage,
   SearchResult,
@@ -111,14 +112,15 @@ export async function ptpImportFiles(
 /**
  * Thumbnails for a mass-storage card. `sourcePaths[i]` is the file to
  * thumbnail for `imageIds[i]`: a RAF (its embedded preview is used), a
- * HIF/JPEG, or a movie.
+ * HIF/JPEG, or a movie. Resolves with the complete result; `onProgress`
+ * batches may still arrive afterwards (see `fillThumbnails`).
  */
 export async function generateThumbnails(
   imageIds: string[],
   sourcePaths: string[],
   cacheDir: string,
   onProgress: (batch: ThumbnailBatch) => void
-): Promise<void> {
+): Promise<ThumbnailResult> {
   const channel = new Channel<ThumbnailBatch>();
   channel.onmessage = onProgress;
   return invoke("generate_thumbnails", {
@@ -211,7 +213,7 @@ export async function generateLibraryThumbnails(
   imageIds: string[],
   cacheDir: string,
   onProgress: (batch: ThumbnailBatch) => void
-): Promise<void> {
+): Promise<ThumbnailResult> {
   const channel = new Channel<ThumbnailBatch>();
   channel.onmessage = onProgress;
   return invoke("generate_library_thumbnails", {

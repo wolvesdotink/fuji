@@ -25,6 +25,7 @@ import {
 } from "@/lib/commands";
 import { useAppStore } from "@/stores/app";
 import { deriveSelectionSummary } from "@/lib/selectionSummary";
+import { fillThumbnails } from "@/lib/thumbnails";
 
 /**
  * Where single-file PTP downloads land while culling. Shared (rather than
@@ -50,6 +51,9 @@ export const useGalleryStore = defineStore("gallery", () => {
   // every record (and re-tracking them on every dependency read).
   const images = shallowRef<ImagePair[]>([]);
   const thumbnailPaths = ref<Map<string, string>>(new Map());
+  // Mass-storage ids whose thumbnail could not be generated; their cards fall
+  // back to the source file instead of shimmering forever.
+  const thumbnailFailed = ref<Set<string>>(new Set());
   const isLoadingThumbnails = ref(false);
   const thumbnailProgress = ref({ completed: 0, total: 0 });
   // True while `ptpListImages` is running. PTP catalog takes ~45s for a full
@@ -171,6 +175,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     images.value = [];
     ratings.value = new Map();
     thumbnailPaths.value = new Map();
+    thumbnailFailed.value = new Set();
     ptpPreviewCache.value = new Map();
     markedForCompare.value = new Set();
     currentIndex.value = 0;
@@ -361,6 +366,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     // replaced lands in the discarded map instead of showing on the new
     // card's images.
     const catalogThumbs = thumbnailPaths.value;
+    const catalogFailed = thumbnailFailed.value;
 
     isLoadingThumbnails.value = true;
     thumbnailProgress.value = { completed: 0, total: media.length };
@@ -369,22 +375,26 @@ export const useGalleryStore = defineStore("gallery", () => {
     const cacheDir = await join(home, ".cache", "fuji-culler", "thumbs");
 
     try {
-      await generateThumbnails(
-        media.map((img) => img.id),
-        // Prefer the RAF when there is one: its embedded 4416px JPEG
-        // thumbnails ~4x faster than the 40 MP HIF.
-        media.map((img) => img.raf_path ?? img.hif_path),
-        cacheDir,
-        (batch) => {
-          // In-place .set only, never a new Map: each card tracks its own key,
-          // so only the cards in this batch recompute.
-          for (const item of batch.items) {
-            catalogThumbs.set(item.image_id, item.thumbnail_path);
-          }
-          thumbnailProgress.value = {
-            completed: batch.completed,
-            total: batch.total,
-          };
+      // In-place .set only, never a new Map: each card tracks its own key,
+      // so only the cards in a batch recompute. fillThumbnails applies the
+      // command's full result before resolving, so no path is missed if a
+      // channel batch is still in flight.
+      await fillThumbnails(
+        (onBatch) =>
+          generateThumbnails(
+            media.map((img) => img.id),
+            // Prefer the RAF when there is one: its embedded 4416px JPEG
+            // thumbnails ~4x faster than the 40 MP HIF.
+            media.map((img) => img.raf_path ?? img.hif_path),
+            cacheDir,
+            onBatch
+          ),
+        {
+          paths: catalogThumbs,
+          failed: catalogFailed,
+          onProgress: (completed, total) => {
+            thumbnailProgress.value = { completed, total };
+          },
         }
       );
     } catch (e) {
@@ -724,6 +734,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     detectionError,
     images,
     thumbnailPaths,
+    thumbnailFailed,
     isLoadingThumbnails,
     thumbnailProgress,
     isCataloging,

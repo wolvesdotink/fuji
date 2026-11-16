@@ -11,6 +11,7 @@ import {
   readFileRatings,
   writeFileRating,
 } from "@/lib/commands";
+import { fillThumbnails } from "@/lib/thumbnails";
 
 export const useLibraryStore = defineStore("library", () => {
   // Images. Image records are immutable — the array is only ever replaced
@@ -218,24 +219,26 @@ export const useLibraryStore = defineStore("library", () => {
     const cacheDir = await join(home, ".cache", "fuji-culler", "library-thumbs");
 
     try {
-      await generateLibraryThumbnails(
-        images.value.map((img) => img.file_path),
-        images.value.map((img) => img.id),
-        cacheDir,
-        (batch) => {
-          // In-place .set only — Vue wraps the Map reactively and tracks
-          // has/get per key, so only the cards observing these image_ids
-          // recompute. Reassigning `new Map(...)` here invalidated every
-          // card's thumbnail lookup on each batch, an O(n) storm per
-          // message → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
-          const paths = thumbnailPaths.value;
-          for (const item of batch.items) {
-            paths.set(item.image_id, item.thumbnail_path);
-          }
-          thumbnailProgress.value = {
-            completed: batch.completed,
-            total: batch.total,
-          };
+      // In-place .set only — Vue wraps the Map reactively and tracks has/get
+      // per key, so only the cards observing these image_ids recompute.
+      // Reassigning `new Map(...)` per batch invalidated every card's lookup,
+      // an O(n) storm per message → O(n^2) over a load. fillThumbnails
+      // applies the command's full result before resolving, which
+      // buildSearchIndex (chained after this) depends on: channel batches
+      // can still be in flight when the command resolves.
+      await fillThumbnails(
+        (onBatch) =>
+          generateLibraryThumbnails(
+            images.value.map((img) => img.file_path),
+            images.value.map((img) => img.id),
+            cacheDir,
+            onBatch
+          ),
+        {
+          paths: thumbnailPaths.value,
+          onProgress: (completed, total) => {
+            thumbnailProgress.value = { completed, total };
+          },
         }
       );
     } catch (e) {
