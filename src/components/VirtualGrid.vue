@@ -233,16 +233,34 @@ function scrollToPosition(scrollTop: number) {
 }
 
 /**
+ * Below this a measured row height is noise, not a layout change. WebKit
+ * snaps each box's edges to 1/64px, so the same card measures up to 1/64px
+ * taller or shorter depending on its fractional position: measured at the top
+ * of the grid on mount and again at a restored position mid-list, it differs.
+ * Taken as a change, re-applying the anchor at the new pitch moved the view
+ * by rows × 1/64px (8px at row 500) on every return from the viewer. A real
+ * change is far larger: one pixel of window width changes a card's height by
+ * well over 0.05px at any column count the grid reaches.
+ */
+const PITCH_NOISE = 1 / 32;
+
+/**
  * Re-read the geometry; re-apply the anchor if the column count or row
  * height changed. Unchanged geometry, including the first measurement on
  * mount, leaves scrollTop alone.
  */
 function remeasure() {
-  const before = rowHeight.value > 0 ? { columns: columns.value, pitch: rowPitch.value } : null;
+  const before =
+    rowHeight.value > 0
+      ? { columns: columns.value, pitch: rowPitch.value, height: rowHeight.value }
+      : null;
   measure();
   const changed =
     before !== null &&
-    (before.columns !== columns.value || Math.abs(before.pitch - rowPitch.value) > 0.001);
+    (before.columns !== columns.value ||
+      Math.abs(before.pitch - rowPitch.value) > PITCH_NOISE);
+  // Keep the pitch the current positions were computed with.
+  if (before !== null && !changed) rowHeight.value = before.height;
   if (changed) reanchor();
   else update();
 }
