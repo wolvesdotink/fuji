@@ -48,7 +48,14 @@ const thumbnailSrc = computed(() => {
   }
   // Mass storage: loadThumbnails generates a thumbnail for every still and
   // movie, RAF-paired or not, so show the shimmer skeleton until it lands
-  // rather than decoding the full-resolution HIF/JPEG as a stand-in.
+  // rather than decoding the full-resolution HIF/JPEG as a stand-in. Only if
+  // generation failed does a still fall back to the source file itself.
+  if (
+    props.image.media_type === "Image" &&
+    store.thumbnailFailed.has(props.image.id)
+  ) {
+    return fileUrl(props.image.hif_path);
+  }
   return "";
 });
 
