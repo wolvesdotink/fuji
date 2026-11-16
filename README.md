@@ -36,6 +36,7 @@ The app is signed and notarized, so macOS will open it without warnings on first
 ### Library Browser
 - **Browse imported media** — View and re-rate any folder of previously imported photos and videos
 - **Sort by date or stars** — Multiple sort orders to find photos quickly
+- **Filter by rating and media type** — Show only N stars and up, only unrated media, or only photos or videos. Filters combine with every sort order and with search, and rating a photo in the viewer never pulls it out from under you
 - **AI-powered semantic search** — Type natural language queries like "golden hour landscape" or "portrait with bokeh" and find matching photos using a local CLIP model (no internet required after first download)
 - **CLIP index** — Automatically built in the background after each library load; the model runs entirely on-device
 
@@ -69,7 +70,8 @@ The app is signed and notarized, so macOS will open it without warnings on first
 | `G` | Toggle grid / single view |
 | `M` | Mark / unmark image for compare |
 | `C` | Open compare view (requires 2+ marked) |
-| `Esc` | Exit compare mode |
+| `Z` | Zoom: toggle fit / 100% (photos) |
+| `Esc` | Back to fit when zoomed; exit compare mode |
 
 ### Library Mode
 
@@ -79,8 +81,17 @@ The app is signed and notarized, so macOS will open it without warnings on first
 | `1`–`5` | Set star rating |
 | `0` | Clear rating |
 | `G` | Toggle grid / single view |
+| `Z` | Zoom: toggle fit / 100% (photos) |
 | `/` | Focus search input |
-| `Esc` | Return to grid or clear search |
+| `Esc` | Back to fit when zoomed, then return to grid or clear search |
+
+### Zooming in the viewer
+
+Click a photo to view it at 100% (one image pixel per screen pixel) around the
+point you clicked; click again, double-click, `Z` or `Esc` to go back to fit.
+Scroll or pinch to zoom anywhere between fit and 400%, and drag to pan. The
+zoom level and position are kept while you step through photos with `←` / `→`,
+so you can compare focus across a burst, and reset when you leave the viewer.
 
 ---
 
@@ -178,3 +189,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+### Fonts
+
+The app bundles two typefaces, both under the [SIL Open Font License 1.1](https://openfontlicense.org):
+
+- [Outfit](https://github.com/Outfitio/Outfit-Fonts), Copyright 2021 The Outfit Project Authors
+- [Syne](https://gitlab.com/bonjour-monde/fonderie/syne-typeface), Copyright 2019 The Syne Project Authors
+
+The font files come from the `@fontsource-variable` packages. Their license texts ship with the app in `licenses/` (source: [`public/licenses/`](public/licenses/)).

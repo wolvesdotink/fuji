@@ -1,3 +1,4 @@
+import { getCurrentInstance, onBeforeUnmount } from "vue";
 import { fileUrl } from "@/lib/commands";
 
 // Module-level decoded-image LRU — persists across component instances for
@@ -76,6 +77,10 @@ export function useHoverPreload() {
       timer = null;
     }
   }
+
+  // A card can unmount while hovered (the grid is windowed, so scrolling its
+  // row away removes it) and never see mouseleave; drop its pending preload.
+  if (getCurrentInstance()) onBeforeUnmount(cancelPreload);
 
   return { startPreload, cancelPreload };
 }

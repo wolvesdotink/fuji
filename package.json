@@ -17,6 +17,8 @@
     "bump:major": "./scripts/bump.sh major"
   },
   "dependencies": {
+    "@fontsource-variable/outfit": "^5.3.0",
+    "@fontsource-variable/syne": "^5.3.0",
     "vue": "^3.5.13",
     "pinia": "^3.0.2",
     "@tauri-apps/api": "^2.5.0",

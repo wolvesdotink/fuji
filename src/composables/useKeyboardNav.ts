@@ -7,6 +7,21 @@ import {
   activeVideoPlayer,
   type VideoPlayerHandle,
 } from "@/lib/videoPlayerBus";
+import { activeLoupe } from "@/lib/loupeBus";
+
+/**
+ * The grid card's thumbnail container for the item at `index` in the grid's
+ * current list, used as the hero of the grid→viewer morph. Looked up by index
+ * rather than image id: ids are file stems, which repeat across folders in a
+ * recursive library scan. The grids are windowed, so the card is only in the
+ * DOM when its row is near the viewport; null otherwise, and the transition
+ * falls back to a plain cross-fade.
+ */
+function gridThumbnail(gridSelector: string, index: number): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    `${gridSelector} .thumbnail-container[data-index="${index}"]`
+  );
+}
 
 export function useKeyboardNav() {
   const appStore = useAppStore();
@@ -151,9 +166,11 @@ export function useKeyboardNav() {
         if (libImg) {
           // Find the card's container for imperative tagging (grid→single only)
           const sourceEl = libraryStore.viewMode === "grid"
-            ? document.querySelector<HTMLElement>(`.library-grid .thumbnail-container:nth-child(${libraryStore.currentIndex + 1})`)
-              ?? document.querySelectorAll<HTMLElement>(".library-grid .thumbnail-container")[libraryStore.currentIndex]
+            ? gridThumbnail(".library-grid", libraryStore.currentIndex)
             : null;
+          // Leaving the viewer zoomed: drop to fit first so the morph back
+          // to the grid card starts from the whole frame, not a 100% crop.
+          activeLoupe.value?.reset();
           startTransition(libImg.id, () => {
             libraryStore.viewMode =
               libraryStore.viewMode === "grid" ? "single" : "grid";
@@ -161,6 +178,12 @@ export function useKeyboardNav() {
         }
         break;
       }
+      case "z":
+      case "Z":
+        if (libraryStore.viewMode !== "single") break;
+        e.preventDefault();
+        activeLoupe.value?.toggle();
+        break;
       case "/":
         e.preventDefault();
         // Focus the search input
@@ -168,7 +191,10 @@ export function useKeyboardNav() {
         break;
       case "Escape":
         e.preventDefault();
-        if (libraryStore.viewMode === "single") {
+        // Zoomed in: the first Esc only returns to fit.
+        if (libraryStore.viewMode === "single" && activeLoupe.value?.isZoomed()) {
+          activeLoupe.value.reset();
+        } else if (libraryStore.viewMode === "single") {
           const libEscImg = libraryStore.currentImage;
           if (libEscImg) {
             startTransition(libEscImg.id, () => {
@@ -256,8 +282,9 @@ export function useKeyboardNav() {
         const camImg = galleryStore.currentImage;
         if (camImg) {
           const sourceEl = galleryStore.viewMode === "grid"
-            ? document.querySelectorAll<HTMLElement>(".image-grid .thumbnail-container")[galleryStore.currentIndex]
+            ? gridThumbnail(".image-grid", galleryStore.currentIndex)
             : null;
+          activeLoupe.value?.reset();
           startTransition(camImg.id, () => {
             galleryStore.viewMode =
               galleryStore.viewMode === "grid" ? "single" : "grid";
@@ -265,6 +292,19 @@ export function useKeyboardNav() {
         }
         break;
       }
+      case "z":
+      case "Z":
+        if (galleryStore.viewMode !== "single") break;
+        e.preventDefault();
+        activeLoupe.value?.toggle();
+        break;
+      case "Escape":
+        // Compare mode handled Esc above; in single view it only unzooms.
+        if (galleryStore.viewMode === "single" && activeLoupe.value?.isZoomed()) {
+          e.preventDefault();
+          activeLoupe.value.reset();
+        }
+        break;
       // Compare mode
       case "m":
       case "M": {
