@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test": "node --experimental-strip-types --import ./tests/register.mjs --test tests/*.test.ts",
     "tauri": "tauri",
     "bump:patch": "./scripts/bump.sh patch",
     "bump:minor": "./scripts/bump.sh minor",
