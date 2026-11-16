@@ -8,6 +8,7 @@ import {
   type VideoPlayerHandle,
 } from "@/lib/videoPlayerBus";
 import { activeLoupe } from "@/lib/loupeBus";
+import { activeGridCursor, cursorTarget, isCursorKey } from "@/lib/gridCursor";
 
 /**
  * The grid card's thumbnail container for the item at `index` in the grid's
@@ -21,6 +22,27 @@ function gridThumbnail(gridSelector: string, index: number): HTMLElement | null 
   return document.querySelector<HTMLElement>(
     `${gridSelector} .thumbnail-container[data-index="${index}"]`
   );
+}
+
+/** A focused control reached with Tab, which Enter and Space activate. */
+function isControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    target.closest("button, a[href], select, [role='button']") !== null
+  );
+}
+
+/** What the grid-mode keys need from the camera or library store. */
+interface GridNav {
+  /** The grid's container class, for finding the hero card. */
+  selector: string;
+  count(): number;
+  index(): number;
+  setIndex(index: number): void;
+  /** Id of the photo under the cursor, or null for an empty grid. */
+  currentId(): string | null;
+  /** Switch to the viewer (inside the view transition). */
+  openViewer(): void;
 }
 
 export function useKeyboardNav() {
@@ -83,6 +105,138 @@ export function useKeyboardNav() {
     }
   }
 
+  /**
+   * A modal owns the keyboard: the camera import prompt (it takes Enter and
+   * Esc itself) or the full-screen import screen.
+   */
+  function overlayOwnsKeyboard(): boolean {
+    return (
+      document.querySelector('[aria-modal="true"]') !== null ||
+      (galleryStore.importState !== "idle" && galleryStore.importScreenVisible)
+    );
+  }
+
+  /** Bring the grid's cursor into view (after a pending list change). */
+  function revealCursor() {
+    return activeGridCursor.value?.reveal() ?? Promise.resolve();
+  }
+
+  /**
+   * Open the photo under the cursor with the hero morph. Its card is
+   * scrolled into view first (it can be off screen after a mouse scroll), so
+   * the morph starts from it instead of degrading to a cross-fade.
+   */
+  async function openFromGrid(nav: GridNav) {
+    await revealCursor();
+    const id = nav.currentId();
+    if (!id) return;
+    const sourceEl = gridThumbnail(nav.selector, nav.index());
+    startTransition(id, nav.openViewer, sourceEl);
+  }
+
+  /**
+   * Keys shared by both grids: the keyboard cursor (the store's
+   * currentIndex, drawn on its card) moves in two dimensions and Enter or G
+   * opens it. Returns true when the key is done with here, including keys
+   * deliberately left to the system; false hands it to the mode's own keys.
+   */
+  function handleGridKeys(e: KeyboardEvent, nav: GridNav): boolean {
+    if (overlayOwnsKeyboard()) return true;
+    // Cmd/Ctrl/Alt combinations belong to the system and the webview.
+    if (e.metaKey || e.ctrlKey || e.altKey) return true;
+    if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return true;
+    const count = nav.count();
+    if (count === 0) return false;
+
+    if (isCursorKey(e.key)) {
+      e.preventDefault();
+      const cursor = activeGridCursor.value;
+      nav.setIndex(
+        cursorTarget(e.key, nav.index(), count, cursor?.columns ?? 1, cursor?.pageRows() ?? 1)
+      );
+      // Also when the cursor didn't move: it may be off screen after a
+      // mouse scroll.
+      void revealCursor();
+      return true;
+    }
+    switch (e.key) {
+      case "Enter":
+      case "g":
+      case "G":
+        e.preventDefault();
+        if (!e.repeat) void openFromGrid(nav);
+        return true;
+    }
+    return false;
+  }
+
+  const libraryGrid: GridNav = {
+    selector: ".library-grid",
+    count: () => libraryStore.displayImages.length,
+    index: () => libraryStore.currentIndex,
+    setIndex: (i) => (libraryStore.currentIndex = i),
+    currentId: () => libraryStore.currentImage?.id ?? null,
+    openViewer: () => (libraryStore.viewMode = "single"),
+  };
+
+  const cameraGrid: GridNav = {
+    selector: ".image-grid",
+    count: () => galleryStore.images.length,
+    index: () => galleryStore.currentIndex,
+    setIndex: (i) => (galleryStore.currentIndex = i),
+    currentId: () => galleryStore.currentImage?.id ?? null,
+    openViewer: () => (galleryStore.viewMode = "single"),
+  };
+
+  /** Library grid: shared grid keys, plus rating the photo under the cursor. */
+  function handleLibraryGridKeys(e: KeyboardEvent): boolean {
+    if (handleGridKeys(e, libraryGrid)) return true;
+    if (/^[0-5]$/.test(e.key)) {
+      e.preventDefault();
+      const img = libraryStore.currentImage;
+      if (img) {
+        // Rate only, like the viewer. Under the Stars sort (or a rating
+        // filter) the list changes live in the grid; the store keeps the
+        // cursor on this photo (or its nearest neighbour) and the grid
+        // scrolls to keep it on screen.
+        libraryStore.setRating(img.file_path, parseInt(e.key));
+        void revealCursor();
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Camera grid: shared grid keys; rating (then advancing), Space and M act
+   * as in the viewer, and the cursor is brought into view afterwards.
+   */
+  function handleCameraGridKeys(e: KeyboardEvent): boolean {
+    if (handleGridKeys(e, cameraGrid)) return true;
+    if (/^[0-5]$/.test(e.key)) {
+      e.preventDefault();
+      galleryStore.rateAndAdvance(parseInt(e.key));
+      void revealCursor();
+      return true;
+    }
+    switch (e.key) {
+      case " ":
+        e.preventDefault();
+        galleryStore.jumpToNextUnreviewed();
+        void revealCursor();
+        return true;
+      case "m":
+      case "M": {
+        e.preventDefault();
+        const img = galleryStore.currentImage;
+        if (img) galleryStore.toggleMarkForCompare(img.id);
+        void revealCursor();
+        return true;
+      }
+    }
+    return false;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     // Native-controls fallback (VideoPlayer's `nativeControls` prop): when the
     // browser's own control bar owns the element, let it keep Space and the
@@ -117,6 +271,8 @@ export function useKeyboardNav() {
   }
 
   function handleLibraryKeys(e: KeyboardEvent) {
+    if (libraryStore.viewMode === "grid" && handleLibraryGridKeys(e)) return;
+
     const player = activeVideoPlayer.value;
     if (
       player &&
@@ -209,6 +365,8 @@ export function useKeyboardNav() {
   }
 
   function handleCameraKeys(e: KeyboardEvent) {
+    if (galleryStore.viewMode === "grid" && handleCameraGridKeys(e)) return;
+
     // In compare mode, arrow keys / number keys / G would be confusing
     // (there's no "current image" to navigate) — only Esc, C, and M are
     // meaningful. Handle those up front and early-return.
