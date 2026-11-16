@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 use tauri::State;
 
@@ -18,6 +19,73 @@ const COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB buffer
 /// (deserialize + reactive update on the webview main thread) per 8MB chunk,
 /// thousands over a big import. File boundaries always emit regardless.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Creation and modification time of a file. Imported copies get the camera
+/// file's dates, so they keep their capture dates (and the camera's order when
+/// sorted by date) instead of showing the time of the import.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FileDates {
+    created: SystemTime,
+    modified: SystemTime,
+}
+
+impl FileDates {
+    /// Read a file's current dates. Filesystems without a birth time fall
+    /// back to the modification time.
+    fn of(path: &Path) -> Option<FileDates> {
+        let metadata = fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?;
+        let created = metadata.created().unwrap_or(modified);
+        Some(FileDates { created, modified })
+    }
+
+    /// Both dates set to one camera timestamp (seconds since the Unix epoch).
+    fn from_unix_secs(secs: f64) -> Option<FileDates> {
+        if !secs.is_finite() || secs < 0.0 {
+            return None;
+        }
+        let time = UNIX_EPOCH + Duration::from_secs_f64(secs);
+        Some(FileDates {
+            created: time,
+            modified: time,
+        })
+    }
+
+    fn apply(&self, path: &Path) -> std::io::Result<()> {
+        let file = fs::OpenOptions::new().write(true).open(path)?;
+        let times = fs::FileTimes::new().set_modified(self.modified);
+        #[cfg(target_os = "macos")]
+        let times = {
+            use std::os::macos::fs::FileTimesExt;
+            times.set_created(self.created)
+        };
+        file.set_times(times)
+    }
+}
+
+/// Stamp `dates` onto `path`. Best-effort: a file with the wrong date is still
+/// a good import, so a failure is logged rather than aborting the batch.
+fn apply_dates(path: &Path, dates: Option<FileDates>) {
+    if let Some(dates) = dates {
+        if let Err(e) = dates.apply(path) {
+            log::warn!("Failed to set file dates on {}: {}", path.display(), e);
+        }
+    }
+}
+
+/// Write XMP ratings into imported files without touching their dates. An
+/// in-place XMP write bumps the modification time, which would undo the
+/// camera dates stamped on during the copy.
+fn write_ratings_keeping_dates(file_ratings: &[(String, u8)]) {
+    for (file_path, rating) in file_ratings {
+        let path = Path::new(file_path);
+        let dates = FileDates::of(path);
+        if let Err(e) = metadata::write_rating(file_path, *rating) {
+            log::warn!("Failed to write rating for {}: {}", file_path, e);
+        }
+        apply_dates(path, dates);
+    }
+}
 
 /// Copy one file in `COPY_BUFFER_SIZE` chunks, reporting each chunk's size to
 /// `on_bytes` as it lands. Chunked rather than `fs::copy` so the caller can keep
@@ -129,6 +197,7 @@ fn import_files_blocking(
             phase: ImportPhase::CopyingToLaCie,
         });
 
+        let source_dates = FileDates::of(src);
         copy_file_chunked(src, &dst, |chunk| {
             bytes_copied += chunk;
 
@@ -144,6 +213,7 @@ fn import_files_blocking(
                 });
             }
         })?;
+        apply_dates(&dst, source_dates);
 
         // File boundary: always emit so the files counter and bar never lag
         // behind a completed file, even inside the throttle window.
@@ -183,9 +253,7 @@ fn import_files_blocking(
             phase: ImportPhase::CopyingToLaCie,
         });
 
-        if let Err(e) = metadata::write_ratings_batch(&file_ratings) {
-            log::warn!("Failed to write some ratings: {}", e);
-        }
+        write_ratings_keeping_dates(&file_ratings);
     }
 
     // Phase 2: Import HIF files to Apple Photos
@@ -297,26 +365,30 @@ fn ptp_import_files_blocking(
     fs::create_dir_all(dest)
         .map_err(|e| format!("Failed to create destination directory: {}", e))?;
 
-    // Collect all file names to fetch, each with its catalog size (when the
-    // frontend knew one) so the preview cache can be validated below.
+    // Collect all file names to fetch, in camera order, each with its catalog
+    // size (when the frontend knew one) so the preview cache can be validated
+    // below. The camera's file dates are kept aside to stamp onto the copies.
     let mut wanted: Vec<(String, Option<u64>)> = Vec::new();
+    let mut camera_dates: HashMap<String, FileDates> = HashMap::new();
+    let mut want = |path: &str, size: Option<u64>, date: Option<f64>| {
+        if let Some((_, file_name)) = ptp::parse_ptp_path(path) {
+            if let Some(dates) = date.and_then(FileDates::from_unix_secs) {
+                camera_dates.insert(file_name.clone(), dates);
+            }
+            wanted.push((file_name, size));
+        }
+    };
 
     for selection in &selections {
         match selection.choice {
             SelectionChoice::Skip => continue,
             SelectionChoice::HeifOnly => {
-                if let Some((_, file_name)) = ptp::parse_ptp_path(&selection.hif_path) {
-                    wanted.push((file_name, selection.hif_size));
-                }
+                want(&selection.hif_path, selection.hif_size, selection.hif_date);
             }
             SelectionChoice::HeifAndRaw => {
-                if let Some((_, file_name)) = ptp::parse_ptp_path(&selection.hif_path) {
-                    wanted.push((file_name, selection.hif_size));
-                }
+                want(&selection.hif_path, selection.hif_size, selection.hif_date);
                 if let Some(ref raf_path) = selection.raf_path {
-                    if let Some((_, file_name)) = ptp::parse_ptp_path(raf_path) {
-                        wanted.push((file_name, selection.raf_size));
-                    }
+                    want(raf_path, selection.raf_size, selection.raf_date);
                 }
             }
         }
@@ -457,6 +529,22 @@ fn ptp_import_files_blocking(
         );
     }
 
+    // Cache hits were copied first and camera downloads second; put everything
+    // back in camera order so Photos receives the files in the order they were
+    // shot.
+    let camera_order: HashMap<&str, usize> = wanted
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (name.as_str(), i))
+        .collect();
+    imported.sort_by_key(|(name, _)| camera_order.get(name.as_str()).copied().unwrap_or(usize::MAX));
+
+    // Both a download and a cache copy land with the current time; give each
+    // file its date from the camera instead.
+    for (name, path) in &imported {
+        apply_dates(Path::new(path), camera_dates.get(name).copied());
+    }
+
     let downloaded_count = imported.len() as u32;
 
     // Report download complete
@@ -492,9 +580,7 @@ fn ptp_import_files_blocking(
         .collect();
 
     if !file_ratings.is_empty() {
-        if let Err(e) = metadata::write_ratings_batch(&file_ratings) {
-            log::warn!("Failed to write some ratings: {}", e);
-        }
+        write_ratings_keeping_dates(&file_ratings);
     }
 
     // Import rendered stills and original movies to Apple Photos. RAF files
@@ -612,5 +698,64 @@ fn activate_apple_photos() {
         }
         Err(e) => log::warn!("Failed to run osascript to activate Apple Photos: {}", e),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fuji_{}_{}", tag, nanos));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    // A copied file carries the source's dates, not the time of the copy.
+    #[test]
+    fn copy_then_apply_keeps_source_dates() {
+        let dir = unique_temp_dir("import_dates");
+        let src = dir.join("DSCF0001.HIF");
+        let dst = dir.join("copy.HIF");
+        fs::write(&src, b"image bytes").unwrap();
+        let camera = FileDates {
+            created: at(1_700_000_000),
+            modified: at(1_700_000_005),
+        };
+        camera.apply(&src).unwrap();
+
+        let dates = FileDates::of(&src);
+        copy_file_chunked(&src, &dst, |_| {}).unwrap();
+        apply_dates(&dst, dates);
+
+        assert_eq!(FileDates::of(&dst), Some(camera));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Writing a rating in place must not move the dates stamped on at import.
+    #[test]
+    fn rating_write_keeps_dates() {
+        let dir = unique_temp_dir("import_rating_dates");
+        let path = dir.join("DSCF0002.HIF");
+        let xmp = "<?xpacket begin=\"\"?><rdf:Description xmp:Rating=\"1\"/><?xpacket end=\"w\"?>";
+        fs::write(&path, format!("head{}tail", xmp)).unwrap();
+        let camera = FileDates::from_unix_secs(1_700_000_000.0).unwrap();
+        camera.apply(&path).unwrap();
+
+        let path_str = path.to_string_lossy().to_string();
+        write_ratings_keeping_dates(&[(path_str, 4)]);
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("xmp:Rating=\"4\""));
+        assert_eq!(FileDates::of(&path), Some(camera));
+        fs::remove_dir_all(&dir).ok();
     }
 }

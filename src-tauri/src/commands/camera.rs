@@ -316,6 +316,8 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFin
                 raf_size,
                 media_type: MediaType::Image,
                 thumbnail_path: None,
+                hif_date: None,
+                raf_date: None,
             }
         })
         .collect();
@@ -328,6 +330,8 @@ fn list_images_mass_storage(dcim_path: &str) -> Result<(Vec<ImagePair>, IndexFin
         raf_size: None,
         media_type: MediaType::Video,
         thumbnail_path: None,
+        hif_date: None,
+        raf_date: None,
     }));
 
     // Also include any RAF files without a matching HIF
@@ -350,9 +354,9 @@ fn list_images_ptp(
     let catalog = bridge.catalog(camera_name, thumb_cache_dir)?;
 
     // Group files by stem into HIF/RAF pairs
-    let mut hif_files: std::collections::HashMap<String, (String, u64, Option<String>)> =
+    let mut hif_files: std::collections::HashMap<String, (String, u64, Option<String>, Option<f64>)> =
         std::collections::HashMap::new();
-    let mut raf_files: std::collections::HashMap<String, (String, u64)> =
+    let mut raf_files: std::collections::HashMap<String, (String, u64, Option<f64>)> =
         std::collections::HashMap::new();
     let mut videos: Vec<ImagePair> = Vec::new();
 
@@ -372,10 +376,13 @@ fn list_images_ptp(
 
         if is_image_extension(&extension) {
             let ptp_path = ptp::make_ptp_path(camera_name, &file.name);
-            hif_files.insert(stem, (ptp_path, file.size.max(0) as u64, file.thumbnail.clone()));
+            hif_files.insert(
+                stem,
+                (ptp_path, file.size.max(0) as u64, file.thumbnail.clone(), file.date),
+            );
         } else if name_upper.ends_with(".RAF") {
             let ptp_path = ptp::make_ptp_path(camera_name, &file.name);
-            raf_files.insert(stem, (ptp_path, file.size.max(0) as u64));
+            raf_files.insert(stem, (ptp_path, file.size.max(0) as u64, file.date));
         } else if is_video_extension(&extension) {
             videos.push(ImagePair {
                 id: file.name.clone(),
@@ -385,17 +392,19 @@ fn list_images_ptp(
                 raf_size: None,
                 media_type: MediaType::Video,
                 thumbnail_path: file.thumbnail.clone(),
+                hif_date: file.date,
+                raf_date: None,
             });
         }
     }
 
     let mut pairs: Vec<ImagePair> = hif_files
         .into_iter()
-        .map(|(stem, (hif_path, hif_size, thumbnail_path))| {
-            let (raf_path, raf_size) = raf_files
+        .map(|(stem, (hif_path, hif_size, thumbnail_path, hif_date))| {
+            let (raf_path, raf_size, raf_date) = raf_files
                 .remove(&stem)
-                .map(|(p, s)| (Some(p), Some(s)))
-                .unwrap_or((None, None));
+                .map(|(p, s, d)| (Some(p), Some(s), d))
+                .unwrap_or((None, None, None));
 
             ImagePair {
                 id: stem,
@@ -405,6 +414,8 @@ fn list_images_ptp(
                 raf_size,
                 media_type: MediaType::Image,
                 thumbnail_path,
+                hif_date,
+                raf_date,
             }
         })
         .collect();

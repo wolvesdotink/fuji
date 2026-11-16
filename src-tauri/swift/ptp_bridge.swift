@@ -325,6 +325,12 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
         return ["HIF", "HEIF", "HEIC", "JPG", "JPEG", "MOV", "MP4", "M4V", "AVI"].contains(ext)
     }
 
+    /// The date the camera recorded for a file, which the importer stamps onto
+    /// the copy so it keeps its capture date instead of the download time.
+    func cameraFileDate(_ file: ICCameraFile) -> Date? {
+        return file.creationDate ?? file.modificationDate
+    }
+
     func thumbnailCacheId(_ name: String) -> String {
         let ext = (name as NSString).pathExtension.uppercased()
         // Movie ids include their extension on the Rust/TypeScript side so a
@@ -601,6 +607,9 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
                 "uti": file.uti ?? "",
                 "folder": file.parentFolder?.name ?? ""
             ]
+            if let date = cameraFileDate(file) {
+                entry["date"] = date.timeIntervalSince1970
+            }
 
             // Save thumbnail if we got one
             if let cgImage = thumbnailResults[name] {
@@ -1005,6 +1014,9 @@ class PtpBridge: NSObject, ICDeviceBrowserDelegate, ICCameraDeviceDelegate, ICCa
                 "uti": file.uti ?? "",
                 "folder": file.parentFolder?.name ?? ""
             ]
+            if let date = cameraFileDate(file) {
+                entry["date"] = date.timeIntervalSince1970
+            }
 
             if let cgImage = thumbnailResults[name] {
                 let thumbPath = thumbURL.appendingPathComponent("\(cacheId)_thumb.jpg")

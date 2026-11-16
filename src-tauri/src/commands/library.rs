@@ -143,8 +143,13 @@ fn scan_library_images(dir: &Path) -> Result<(Vec<LibraryImage>, IndexFingerprin
         });
     }
 
-    // Sort by creation time descending (newest first)
-    images.sort_by(|a, b| b.date_created.cmp(&a.date_created));
+    // Newest first. Burst shots share a timestamp to the second, so ties fall
+    // back to the camera's file numbering to keep the order they were shot in.
+    images.sort_by(|a, b| {
+        b.date_created
+            .cmp(&a.date_created)
+            .then_with(|| b.file_name.cmp(&a.file_name))
+    });
 
     Ok((images, fingerprint.finish()))
 }

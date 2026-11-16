@@ -431,6 +431,8 @@ export const useGalleryStore = defineStore("gallery", () => {
         rating,
         hif_size: img.hif_size,
         raf_size: img.raf_size,
+        hif_date: img.hif_date,
+        raf_date: img.raf_date,
       });
     }
     return selections;
