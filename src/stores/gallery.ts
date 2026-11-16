@@ -28,9 +28,9 @@ import { deriveSelectionSummary } from "@/lib/selectionSummary";
 
 /**
  * Where single-file PTP downloads land while culling. Shared (rather than
- * re-derived at each call site) because three separate consumers must agree on
- * it: the viewer preview download, the importer — which copies from here
- * instead of re-fetching from the camera — and the startup LRU prune.
+ * re-derived at each call site) because the viewer preview download and the
+ * startup LRU prune must agree on it. The importer reuses only the files
+ * listed in this session's `ptpPreviewCache`, never the folder as a whole.
  */
 export async function ptpPreviewCacheDir(): Promise<string> {
   const home = await homeDir();
@@ -261,6 +261,9 @@ export const useGalleryStore = defineStore("gallery", () => {
         }
       }
       ratings.value = new Map();
+      // Previews downloaded for an earlier catalog may belong to another card
+      // whose files share these names, so they must not be shown or imported.
+      ptpPreviewCache.value = new Map();
       currentIndex.value = 0;
 
       // If the user navigated away while the catalog ran (back to library),
@@ -460,15 +463,21 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     try {
       if (isPtp() && camera.value) {
-        // PTP import: download from camera via ptp-bridge. Hand it the preview
-        // cache so anything already pulled while culling (notably that 4 GB
-        // clip the user just watched) is copied from disk instead of re-fetched
-        // over USB.
+        // PTP import: download from camera via ptp-bridge. Hand it the
+        // previews pulled while culling (notably that 4 GB clip the user just
+        // watched) so they are copied from disk instead of re-fetched over
+        // USB. Only this session's downloads count: the cache folder outlives
+        // the session, and another card can reuse the same file names.
+        const previewFiles: Record<string, string> = {};
+        for (const img of images.value) {
+          const localPath = ptpPreviewCache.value.get(img.id);
+          if (localPath) previewFiles[ptpFileName(img.hif_path)] = localPath;
+        }
         await ptpImportFiles(
           camera.value.mount_path,
           importSelections,
           importDestination.value,
-          await ptpPreviewCacheDir(),
+          previewFiles,
           onProgress
         );
       } else {
@@ -564,6 +573,10 @@ export const useGalleryStore = defineStore("gallery", () => {
     if (pending) return pending;
 
     const cam = camera.value;
+    // Record the result in the cache of the catalog that asked for it. If the
+    // catalog reloads mid-download, the finished file lands in the discarded
+    // map instead of being credited to a different card's image.
+    const cache = ptpPreviewCache.value;
     const download = (async () => {
       const cacheDir = await ptpPreviewCacheDir();
       const fileName = ptpFileName(hifPath);
@@ -576,7 +589,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         );
         // In-place .set — Vue tracks Map access per key, so only consumers of
         // this imageId recompute (a full Map reassignment invalidates them all).
-        ptpPreviewCache.value.set(imageId, localPath);
+        cache.set(imageId, localPath);
         return localPath;
       } finally {
         // Done, failed or cancelled — either way no bytes are moving, so drop
@@ -642,6 +655,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     camera.value = null;
     images.value = [];
     ratings.value = new Map();
+    ptpPreviewCache.value = new Map();
     markedForCompare.value = new Set();
     currentIndex.value = 0;
     importState.value = "idle";

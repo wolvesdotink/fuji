@@ -323,9 +323,13 @@ fn import_files_blocking(
 /// Import files from a PTP camera.
 /// Downloads files via ptp-bridge, then imports to Apple Photos.
 ///
-/// `preview_cache_dir` is the directory the viewer downloads PTP previews into
-/// while culling. Anything already there is copied locally instead of being
-/// pulled off the camera a second time.
+/// `preview_files` maps camera file names to previews the viewer downloaded
+/// from this camera during the current session. Those are copied locally
+/// instead of being pulled off the camera a second time. The frontend lists
+/// only its own session's downloads: the cache folder outlives the session,
+/// and a later card can reuse the same file names (and, for fixed-size
+/// files, the same sizes), so a bare folder lookup could import the wrong
+/// photo.
 ///
 /// Async wrapper so the blocking download + osascript calls run on a dedicated
 /// thread instead of Tauri's main thread.
@@ -335,7 +339,7 @@ pub async fn ptp_import_files(
     camera_name: String,
     selections: Vec<ImportSelection>,
     dest_dir: String,
-    preview_cache_dir: Option<String>,
+    preview_files: HashMap<String, String>,
     on_progress: Channel<ImportProgress>,
 ) -> Result<(), String> {
     let bridge = bridge.inner().clone();
@@ -345,7 +349,7 @@ pub async fn ptp_import_files(
             camera_name,
             selections,
             dest_dir,
-            preview_cache_dir,
+            preview_files,
             on_progress,
         )
     })
@@ -358,7 +362,7 @@ fn ptp_import_files_blocking(
     camera_name: String,
     selections: Vec<ImportSelection>,
     dest_dir: String,
-    preview_cache_dir: Option<String>,
+    preview_files: HashMap<String, String>,
     on_progress: Channel<ImportProgress>,
 ) -> Result<(), String> {
     let dest = Path::new(&dest_dir);
@@ -396,11 +400,10 @@ fn ptp_import_files_blocking(
 
     let files_total = wanted.len() as u32;
 
-    // Split the batch: files already in the preview cache from culling are
-    // copied at disk speed, the rest come off the camera. Only a byte-exact size
-    // match counts as the same file — an unknown size is never trusted, since a
-    // truncated or stale cache entry would silently corrupt the import.
-    let cache_dir = preview_cache_dir.as_deref().map(Path::new);
+    // Split the batch: previews downloaded while culling are copied at disk
+    // speed, the rest come off the camera. A preview also needs a byte-exact
+    // size match — an unknown size is never trusted, since a truncated or
+    // stale cache entry would silently corrupt the import.
     let mut from_cache: Vec<(String, PathBuf)> = Vec::new();
     let mut from_camera: Vec<String> = Vec::new();
     let mut bytes_total: u64 = 0;
@@ -408,8 +411,8 @@ fn ptp_import_files_blocking(
     for (file_name, size) in &wanted {
         bytes_total += size.unwrap_or(0);
 
-        if let (Some(dir), Some(expected)) = (cache_dir, *size) {
-            let cached = dir.join(file_name);
+        if let (Some(cached), Some(expected)) = (preview_files.get(file_name), *size) {
+            let cached = PathBuf::from(cached);
             let usable = fs::metadata(&cached)
                 .map(|m| m.is_file() && m.len() == expected)
                 .unwrap_or(false);
