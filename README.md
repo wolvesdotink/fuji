@@ -69,7 +69,8 @@ The app is signed and notarized, so macOS will open it without warnings on first
 | `G` | Toggle grid / single view |
 | `M` | Mark / unmark image for compare |
 | `C` | Open compare view (requires 2+ marked) |
-| `Esc` | Exit compare mode |
+| `Z` | Zoom: toggle fit / 100% (photos) |
+| `Esc` | Back to fit when zoomed; exit compare mode |
 
 ### Library Mode
 
@@ -79,8 +80,17 @@ The app is signed and notarized, so macOS will open it without warnings on first
 | `1`–`5` | Set star rating |
 | `0` | Clear rating |
 | `G` | Toggle grid / single view |
+| `Z` | Zoom: toggle fit / 100% (photos) |
 | `/` | Focus search input |
-| `Esc` | Return to grid or clear search |
+| `Esc` | Back to fit when zoomed, then return to grid or clear search |
+
+### Zooming in the viewer
+
+Click a photo to view it at 100% (one image pixel per screen pixel) around the
+point you clicked; click again, double-click, `Z` or `Esc` to go back to fit.
+Scroll or pinch to zoom anywhere between fit and 400%, and drag to pan. The
+zoom level and position are kept while you step through photos with `←` / `→`,
+so you can compare focus across a burst, and reset when you leave the viewer.
 
 ---
 
