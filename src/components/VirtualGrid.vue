@@ -160,9 +160,12 @@ function resolveIndex(item: T): number | undefined {
 }
 
 function recordAnchor() {
-  if (!scrollEl || rowHeight.value <= 0) return;
+  // An empty list is a pause (filters or a search hiding everything), not
+  // a new place: the scroll position collapses to 0 meanwhile, which must
+  // not replace the anchor the list is restored to when it comes back.
+  if (!scrollEl || rowHeight.value <= 0 || props.items.length === 0) return;
   const top = scrollEl.scrollTop - gridOffset();
-  if (scrollEl.scrollTop <= 0 || top <= 0 || props.items.length === 0) {
+  if (scrollEl.scrollTop <= 0 || top <= 0) {
     anchor = null;
     return;
   }
@@ -199,7 +202,7 @@ let reanchorQueued = false;
  * and the browser would clamp it). Both happen before the next paint.
  */
 function reanchor() {
-  if (!scrollEl || rowHeight.value <= 0) return;
+  if (!scrollEl || rowHeight.value <= 0 || props.items.length === 0) return;
   if (!anchor) {
     update();
     return;
@@ -389,6 +392,12 @@ watch(
 watch(
   [() => props.items, () => props.items.length],
   () => {
+    // Going empty keeps the anchor and the last non-empty list, so the next
+    // list is matched against what the user last saw (see recordAnchor).
+    if (props.items.length === 0 && rowHeight.value > 0) {
+      update();
+      return;
+    }
     const prevItems = listItems;
     const prevIndexOf = indexOf;
     listItems = props.items.slice();

@@ -44,7 +44,10 @@ export function useGridCursor(options: {
 
   async function reveal(mode: "follow" | "return" = "follow") {
     // Let pending renders and VirtualGrid's re-anchoring after a list change
-    // land first, so the target is computed against the current layout.
+    // land first, so the target is computed against the current layout. Two
+    // ticks: VirtualGrid writes the re-anchored scrollTop in a nextTick of
+    // its own, queued in the same flush as this one.
+    await nextTick();
     await nextTick();
     const n = count();
     if (n === 0 || !grid.value) return;
@@ -77,7 +80,9 @@ export function useGridCursor(options: {
   // user saw before a change. Updated after renders, scrolls and reveals.
   let onScreen = true;
   const noteOnScreen = () => {
-    onScreen = visibility(index.value) !== "none";
+    // While the list is empty (filters hiding everything) keep what was
+    // seen before, for when the list comes back.
+    if (count() > 0) onScreen = visibility(index.value) !== "none";
   };
   // Set from a list change until the end of that flush, so an index the
   // store moves in the same flush (the library re-anchoring its selection

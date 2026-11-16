@@ -25,6 +25,17 @@ defineExpose({
   columns: computed(() => grid.value?.columns ?? 1),
 });
 
+// Mount the grid with the first items (it measures its rows on mount), then
+// keep it while the list goes empty and comes back; see the template.
+const gridMounted = ref(false);
+watch(
+  () => store.displayImages.length > 0,
+  (hasItems) => {
+    if (hasItems) gridMounted.value = true;
+  },
+  { immediate: true }
+);
+
 // Keyboard cursor: keep currentIndex in range and its card on screen.
 const container = ref<HTMLElement | null>(null);
 useGridCursor({
@@ -121,9 +132,11 @@ onUnmounted(() => {
       <p class="empty-text" v-else>No photos or videos found in this folder</p>
     </div>
 
-    <!-- Grid -->
+    <!-- Grid. Stays mounted while the list is empty (filters or a search
+         hiding everything): it renders nothing then, but keeps its scroll
+         anchor, so clearing the filters brings back the user's place. -->
     <VirtualGrid
-      v-if="store.displayImages.length > 0"
+      v-if="gridMounted"
       ref="grid"
       class="library-grid"
       role="list"
