@@ -5,6 +5,7 @@ import { useAppStore } from "@/stores/app";
 import { useLibraryStore } from "@/stores/library";
 import { useGalleryStore } from "@/stores/gallery";
 import UpdateButton from "@/components/UpdateButton.vue";
+import LibraryFilter from "@/components/LibraryFilter.vue";
 
 const appStore = useAppStore();
 const libraryStore = useLibraryStore();
@@ -21,8 +22,9 @@ const folderName = computed(() => {
 
 const cameraConnected = computed(() => galleryStore.camera !== null);
 
+// "48 media" normally; "12 of 48 media" while a search or filter narrows it.
 const imageCount = computed(() => {
-  if (libraryStore.searchResults) {
+  if (libraryStore.searchResults || libraryStore.isFiltered) {
     return `${libraryStore.displayImages.length} of ${libraryStore.images.length}`;
   }
   return `${libraryStore.images.length}`;
@@ -43,6 +45,27 @@ const indexStatusText = computed(() => {
   }
   return null;
 });
+
+// Short forms of the status for the header itself; the full message above
+// stays in the tooltip. The label only shows in wide windows (see the media
+// query), so narrow headers get a spinner and a percentage.
+const indexStatusPercent = computed(() => {
+  const pct = (done: number, total: number) =>
+    total > 0 ? `${Math.min(100, Math.floor((done / total) * 100))}%` : "";
+  if (libraryStore.isDownloadingModel) {
+    const p = libraryStore.modelDownloadProgress;
+    return pct(p.bytes_downloaded, p.bytes_total);
+  }
+  if (libraryStore.isIndexing) {
+    const p = libraryStore.indexProgress;
+    return pct(p.completed, p.total);
+  }
+  return "";
+});
+
+const indexStatusLabel = computed(() =>
+  libraryStore.isDownloadingModel ? "AI model" : "Indexing"
+);
 
 watch(localQuery, (val) => {
   if (debounceTimer) clearTimeout(debounceTimer);
@@ -101,12 +124,12 @@ defineExpose({ focusSearch });
           </button>
         </div>
         <div class="header-meta">
-          <span class="image-count">{{ imageCount }} media</span>
+          <span class="image-count" aria-live="polite">{{ imageCount }} media</span>
           <template v-if="indexStatusText">
-            <span class="meta-sep">&middot;</span>
-            <span class="index-status">
+            <span class="index-status" :title="indexStatusText" role="status" :aria-label="indexStatusText">
               <span class="index-spinner"></span>
-              {{ indexStatusText }}
+              <span class="index-label">{{ indexStatusLabel }}</span>
+              <span v-if="indexStatusPercent" class="index-pct">{{ indexStatusPercent }}</span>
             </span>
           </template>
         </div>
@@ -145,6 +168,8 @@ defineExpose({ focusSearch });
 
       <div class="header-right">
         <UpdateButton />
+
+        <LibraryFilter />
 
         <div class="sort-toggle">
           <button
@@ -192,14 +217,15 @@ defineExpose({ focusSearch });
           class="camera-button"
           @click="openCamera"
           :disabled="!cameraConnected"
-          :title="cameraConnected ? 'Open Camera' : 'No camera connected'"
+          :title="cameraConnected ? `Open ${galleryStore.camera?.name}` : 'No camera connected'"
+          :aria-label="cameraConnected ? `Open ${galleryStore.camera?.name}` : 'Camera (none connected)'"
         >
           <span class="camera-dot" v-if="cameraConnected"></span>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
             <circle cx="12" cy="13" r="4" />
           </svg>
-          <span>{{ cameraConnected ? galleryStore.camera?.name : 'Camera' }}</span>
+          <span class="camera-label">{{ cameraConnected ? galleryStore.camera?.name : 'Camera' }}</span>
         </button>
       </div>
     </div>
@@ -214,8 +240,17 @@ defineExpose({ focusSearch });
 }
 
 .header-main {
+  /* Room for the folder-name stub, the count and the short status. */
+  --left-min: 250px;
   display: grid;
-  grid-template-columns: 1fr minmax(200px, 400px) 1fr;
+  /* Every control on the right stays whole (max-content); the left column
+     keeps a fixed minimum and truncates inside it (folder name and status
+     text ellipsize, the count never does); the search box gives way down to
+     120px. Up to 1140px the right side switches to compact forms (see the
+     media query at the end). Together this fits the worst realistic case
+     (long folder name, model-download status, Restart button, both filters,
+     camera with a long name) from 900px up without horizontal overflow. */
+  grid-template-columns: minmax(var(--left-min), 1fr) minmax(120px, 400px) minmax(max-content, 1fr);
   align-items: center;
   padding: 10px 20px;
   gap: 16px;
@@ -224,14 +259,18 @@ defineExpose({ focusSearch });
 .header-left {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 6px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .library-info {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 1 auto;
+  min-width: 72px;
+  margin-right: 4px;
 }
 
 .folder-icon {
@@ -240,6 +279,10 @@ defineExpose({ focusSearch });
 }
 
 .folder-name {
+  max-width: 260px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   background: none;
   border: none;
   font-weight: 600;
@@ -258,32 +301,43 @@ defineExpose({ focusSearch });
   color: var(--color-accent);
 }
 
+/* The count, separator and status sit directly in .header-left's flex row
+   (display: contents), so each shrinks on its own terms: the status text
+   and folder name ellipsize, the count never does. */
 .header-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: contents;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--color-text-muted);
 }
 
-.meta-sep {
-  color: var(--color-border);
-}
-
 .image-count {
+  flex-shrink: 0;
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
+/* Short status ("AI model 35%"), never truncated; the full message is in
+   the tooltip. The folder name is what gives way. */
 .index-status {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
   gap: 5px;
   color: var(--color-accent);
   font-size: 11px;
 }
 
+/* Fixed width for up to "100%" (tabular figures), so the column's minimum
+   covers every value and the text never shifts as it counts up. */
+.index-pct {
+  display: inline-block;
+  min-width: 4.4ch;
+}
+
 .index-spinner {
+  flex-shrink: 0;
   width: 10px;
   height: 10px;
   border: 1.5px solid var(--color-border);
@@ -452,6 +506,12 @@ defineExpose({ focusSearch });
   cursor: not-allowed;
 }
 
+.camera-label {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .camera-dot {
   width: 6px;
   height: 6px;
@@ -459,6 +519,44 @@ defineExpose({ focusSearch });
   background: var(--color-heif);
   box-shadow: 0 0 6px rgba(61, 148, 101, 0.4);
   flex-shrink: 0;
+}
+
+.index-label {
+  display: none;
+}
+
+@media (min-width: 1361px) {
+  .header-main {
+    --left-min: 320px;
+  }
+  .index-label {
+    display: inline;
+  }
+}
+
+/* Compact header for narrow windows. Full texts stay in the tooltips and
+   accessible names. The cut-off sits 40px above the filter trigger's own
+   (1100px, LibraryFilter.vue): just above 1100px the trigger shows its full
+   summary again, and with the camera name also back the worst case ran a
+   few pixels past the window. */
+@media (max-width: 1140px) {
+  .header-main {
+    padding: 10px 16px;
+    gap: 12px;
+  }
+  .header-right {
+    gap: 6px;
+  }
+  .camera-label,
+  .search-hint {
+    display: none;
+  }
+  .camera-button {
+    padding: 6px 10px;
+  }
+  .sort-toggle .toggle-btn {
+    padding: 5px 8px;
+  }
 }
 
 @keyframes spin {

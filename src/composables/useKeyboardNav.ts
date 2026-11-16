@@ -9,6 +9,20 @@ import {
 } from "@/lib/videoPlayerBus";
 import { activeLoupe } from "@/lib/loupeBus";
 
+/**
+ * The grid card's thumbnail container for the item at `index` in the grid's
+ * current list, used as the hero of the grid→viewer morph. Looked up by index
+ * rather than image id: ids are file stems, which repeat across folders in a
+ * recursive library scan. The grids are windowed, so the card is only in the
+ * DOM when its row is near the viewport; null otherwise, and the transition
+ * falls back to a plain cross-fade.
+ */
+function gridThumbnail(gridSelector: string, index: number): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    `${gridSelector} .thumbnail-container[data-index="${index}"]`
+  );
+}
+
 export function useKeyboardNav() {
   const appStore = useAppStore();
   const galleryStore = useGalleryStore();
@@ -152,8 +166,7 @@ export function useKeyboardNav() {
         if (libImg) {
           // Find the card's container for imperative tagging (grid→single only)
           const sourceEl = libraryStore.viewMode === "grid"
-            ? document.querySelector<HTMLElement>(`.library-grid .thumbnail-container:nth-child(${libraryStore.currentIndex + 1})`)
-              ?? document.querySelectorAll<HTMLElement>(".library-grid .thumbnail-container")[libraryStore.currentIndex]
+            ? gridThumbnail(".library-grid", libraryStore.currentIndex)
             : null;
           // Leaving the viewer zoomed: drop to fit first so the morph back
           // to the grid card starts from the whole frame, not a 100% crop.
@@ -269,7 +282,7 @@ export function useKeyboardNav() {
         const camImg = galleryStore.currentImage;
         if (camImg) {
           const sourceEl = galleryStore.viewMode === "grid"
-            ? document.querySelectorAll<HTMLElement>(".image-grid .thumbnail-container")[galleryStore.currentIndex]
+            ? gridThumbnail(".image-grid", galleryStore.currentIndex)
             : null;
           activeLoupe.value?.reset();
           startTransition(camImg.id, () => {
