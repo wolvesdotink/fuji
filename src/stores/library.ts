@@ -193,17 +193,19 @@ export const useLibraryStore = defineStore("library", () => {
       currentIndex.value = same;
       return;
     }
-    const indexById = new Map<string, number>();
-    for (let i = 0; i < list.length; i++) indexById.set(list[i].id, i);
+    // Keyed by record identity, not id: the library scan is recursive, so
+    // two files in different subfolders can share a stem (and an id).
+    const indexOf = new Map<LibraryImage, number>();
+    for (let i = 0; i < list.length; i++) indexOf.set(list[i], i);
     for (let d = 1; d < prevList.length; d++) {
       const after = prevList[prevIndex + d];
-      const hitAfter = after && indexById.get(after.id);
+      const hitAfter = after && indexOf.get(after);
       if (hitAfter !== undefined) {
         currentIndex.value = hitAfter;
         return;
       }
       const before = prevList[prevIndex - d];
-      const hitBefore = before && indexById.get(before.id);
+      const hitBefore = before && indexOf.get(before);
       if (hitBefore !== undefined) {
         currentIndex.value = hitBefore;
         return;
@@ -262,14 +264,19 @@ export const useLibraryStore = defineStore("library", () => {
     }
   }
 
-  // Set by callers that pick the selection themselves while replacing the
-  // list (new search, cleared search, new folder), so the reconciler below
-  // only range-checks their choice instead of re-anchoring over it.
-  let selectionReset = false;
+  // Callers that pick the selection themselves while replacing the list
+  // (new search, cleared search, new folder) jump to the top. The marker is
+  // the exact list the jump was made for, not a flag: a no-op reset (say
+  // clearSearch() when no search was active) changes nothing, so no
+  // reconcile consumes it, and a boolean would linger and swallow the
+  // re-anchor of some later, unrelated change. A list identity can only
+  // ever match the list it was taken from. Call this after the operation's
+  // last mutation of the list's inputs.
+  let resetFor: LibraryImage[] | null = null;
 
   function resetSelection() {
     currentIndex.value = 0;
-    selectionReset = true;
+    resetFor = displayImages.value;
   }
 
   // The selection invariant, owned here: currentIndex is a valid index of
@@ -289,8 +296,8 @@ export const useLibraryStore = defineStore("library", () => {
   // reconcile before the next render, not one per rating. Nothing user-driven
   // can run between the change and the flush.
   watch([displayImages, currentIndex], ([list, idx], [prevList, prevIdx]) => {
-    const reset = selectionReset;
-    selectionReset = false;
+    const reset = list === resetFor;
+    resetFor = null;
     if (list.length === 0) {
       currentIndex.value = 0;
       if (viewMode.value === "single") viewMode.value = "grid";
@@ -325,6 +332,7 @@ export const useLibraryStore = defineStore("library", () => {
   }
 
   function setRating(filePath: string, rating: number) {
+    editedSinceLoad.add(filePath);
     // Mutate the Map directly — Vue 3 wraps Map collections reactively, so
     // per-key observers invalidate, but we avoid triggering every computed
     // that touches `ratings.value` (which a full Map reassignment would do).
@@ -358,6 +366,12 @@ export const useLibraryStore = defineStore("library", () => {
   // already left cannot apply its ratings to the new folder's images.
   let loadGeneration = 0;
 
+  // Paths the user rated since the current folder's ratings read started.
+  // That read reflects the files before those edits, so it must not
+  // overwrite them, whether or not the edit's debounced write has flushed
+  // yet (the pending-write queue empties after 500 ms). Replaced per load.
+  let editedSinceLoad = new Set<string>();
+
   async function loadLibrary(destPath: string) {
     if (!destPath) return;
     const generation = ++loadGeneration;
@@ -374,10 +388,12 @@ export const useLibraryStore = defineStore("library", () => {
       viewMode.value = "grid";
       images.value = listed;
       thumbnailPaths.value = new Map();
-      resetSelection();
       searchResults.value = null;
       searchQuery.value = "";
       ratings.value = new Map();
+      editedSinceLoad = new Set();
+      const edited = editedSinceLoad;
+      resetSelection();
 
       if (images.value.length > 0) {
         // Read ratings from file XMP metadata concurrently. This is
@@ -398,7 +414,7 @@ export const useLibraryStore = defineStore("library", () => {
             );
             for (const [stem, rating] of Object.entries(fileRatings)) {
               const img = imageById.get(stem) ?? imageByStem.get(stem);
-              if (img) {
+              if (img && !edited.has(img.file_path)) {
                 ratings.value.set(img.file_path, rating);
                 hydrated.push([img.file_path, rating]);
               }
@@ -406,13 +422,12 @@ export const useLibraryStore = defineStore("library", () => {
             // Opened the viewer before the read finished: these are the
             // files' own ratings, not edits made in the viewer, so fold them
             // into the snapshot too (the reconciler then keeps the selection
-            // valid). Viewer edits still waiting to be written keep theirs.
+            // valid). Paths the user rated meanwhile were skipped above, so
+            // the snapshot keeps their pre-edit value and the photo stays.
             const frozen = frozenRatings.value;
             if (frozen && hydrated.length > 0) {
               const next = new Map(frozen);
-              for (const [path, rating] of hydrated) {
-                if (!pendingWrites.has(path)) next.set(path, rating);
-              }
+              for (const [path, rating] of hydrated) next.set(path, rating);
               frozenRatings.value = next;
             }
           })
