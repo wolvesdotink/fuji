@@ -126,11 +126,10 @@ defineExpose({ focusSearch });
         <div class="header-meta">
           <span class="image-count" aria-live="polite">{{ imageCount }} media</span>
           <template v-if="indexStatusText">
-            <span class="meta-sep">&middot;</span>
             <span class="index-status" :title="indexStatusText" role="status" :aria-label="indexStatusText">
               <span class="index-spinner"></span>
               <span class="index-label">{{ indexStatusLabel }}</span>
-              <span v-if="indexStatusPercent">{{ indexStatusPercent }}</span>
+              <span v-if="indexStatusPercent" class="index-pct">{{ indexStatusPercent }}</span>
             </span>
           </template>
         </div>
@@ -271,7 +270,7 @@ defineExpose({ focusSearch });
   gap: 8px;
   flex: 0 1 auto;
   min-width: 72px;
-  margin-right: 8px;
+  margin-right: 4px;
 }
 
 .folder-icon {
@@ -312,11 +311,6 @@ defineExpose({ focusSearch });
   color: var(--color-text-muted);
 }
 
-.meta-sep {
-  flex-shrink: 0;
-  color: var(--color-border);
-}
-
 .image-count {
   flex-shrink: 0;
   color: var(--color-text-secondary);
@@ -333,6 +327,13 @@ defineExpose({ focusSearch });
   gap: 5px;
   color: var(--color-accent);
   font-size: 11px;
+}
+
+/* Fixed width for up to "100%" (tabular figures), so the column's minimum
+   covers every value and the text never shifts as it counts up. */
+.index-pct {
+  display: inline-block;
+  min-width: 4.4ch;
 }
 
 .index-spinner {
