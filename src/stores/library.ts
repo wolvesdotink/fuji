@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed, shallowRef, watch } from "vue";
 import { homeDir, join } from "@tauri-apps/api/path";
 import type { LibraryImage, SearchResult } from "@/types";
+import type { RatingFilter, MediaFilter } from "@/lib/libraryFilter";
 import {
   listLibraryImages,
   generateLibraryThumbnails,
@@ -34,6 +35,14 @@ export const useLibraryStore = defineStore("library", () => {
   // → live ratings drive the sort as before.
   const frozenRatings = shallowRef<Map<string, number> | null>(null);
 
+  // Filters. Session state only (not persisted): a filter left on from a
+  // previous session would make a library look half empty on launch.
+  const ratingFilter = ref<RatingFilter>("all");
+  const mediaFilter = ref<MediaFilter>("all");
+  const isFiltered = computed(
+    () => ratingFilter.value !== "all" || mediaFilter.value !== "all"
+  );
+
   // Ratings
   const ratings = ref<Map<string, number>>(new Map()); // file_path → 1-5
   let writeTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -52,22 +61,53 @@ export const useLibraryStore = defineStore("library", () => {
   const modelDownloadProgress = ref({ bytes_downloaded: 0, bytes_total: 0, file_name: "" });
 
   // Computed
+  const searchScores = computed(() => {
+    if (!searchResults.value) return new Map<string, number>();
+    return new Map(searchResults.value.map((r) => [r.image_id, r.score]));
+  });
+
   const displayImages = computed(() => {
-    if (searchResults.value) {
-      const resultIds = new Map(
-        searchResults.value.map((r) => [r.image_id, r.score])
-      );
-      return images.value
-        .filter((img) => resultIds.has(img.id))
-        .sort((a, b) => {
-          const scoreA = resultIds.get(a.id) ?? 0;
-          const scoreB = resultIds.get(b.id) ?? 0;
-          return scoreB - scoreA;
-        });
+    const rf = ratingFilter.value;
+    const mf = mediaFilter.value;
+    const sort = sortBy.value;
+    const scores = searchResults.value ? searchScores.value : null;
+
+    // Ratings are only read when the rating filter or the stars sort needs
+    // them, so with neither active a rating change does not recompute the
+    // list at all. In single view read the frozen snapshot (see
+    // frozenRatings): rating the on-screen photo must neither re-sort it nor
+    // filter it out from under the viewer. `?? ratings.value` short-circuits
+    // in grid mode, so grid tracks live ratings.
+    const needsRatings = rf !== "all" || (!scores && sort === "stars");
+    const r = needsRatings ? (frozenRatings.value ?? ratings.value) : null;
+
+    // One pass: the search scope, the media filter and the rating filter
+    // together. This pass also produces the copy that gets sorted below, so
+    // filtering costs no extra allocation over the old [...images] copy.
+    const src = images.value;
+    let list: LibraryImage[];
+    if (!scores && rf === "all" && mf === "all") {
+      list = src.slice();
+    } else {
+      list = [];
+      for (let i = 0; i < src.length; i++) {
+        const img = src[i];
+        if (scores && !scores.has(img.id)) continue;
+        if (mf !== "all" && img.media_type !== mf) continue;
+        if (rf !== "all") {
+          const stars = r!.get(img.file_path) ?? 0;
+          if (rf === "unrated" ? stars > 0 : stars < rf) continue;
+        }
+        list.push(img);
+      }
     }
 
-    const sort = sortBy.value;
-    const sorted = [...images.value];
+    if (scores) {
+      return list.sort(
+        (a, b) => (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0)
+      );
+    }
+
     // Newest first. Burst shots share a timestamp to the second, so ties fall
     // back to the camera's file numbering to keep the order they were shot in.
     const byName = (a: LibraryImage, b: LibraryImage) =>
@@ -77,50 +117,157 @@ export const useLibraryStore = defineStore("library", () => {
 
     switch (sort) {
       case "updated":
-        sorted.sort((a, b) => b.date_modified - a.date_modified || byName(a, b));
+        list.sort((a, b) => b.date_modified - a.date_modified || byName(a, b));
         break;
-      case "stars": {
-        // In single view read the frozen snapshot so rating the current photo
-        // doesn't re-sort under the viewer. `?? ratings.value` short-circuits
-        // in grid mode, so the sort still tracks live ratings there.
-        const r = frozenRatings.value ?? ratings.value;
-        sorted.sort((a, b) => {
-          const rA = r.get(a.file_path) ?? 0;
-          const rB = r.get(b.file_path) ?? 0;
+      case "stars":
+        list.sort((a, b) => {
+          const rA = r!.get(a.file_path) ?? 0;
+          const rB = r!.get(b.file_path) ?? 0;
           if (rA !== rB) return rB - rA;
           return byCreated(a, b);
         });
         break;
-      }
       case "created":
       default:
-        sorted.sort(byCreated);
+        list.sort(byCreated);
         break;
     }
 
-    return sorted;
+    return list;
+  });
+
+  /**
+   * Per-media histogram of ratings (index 0 = unrated, 1-5 = stars) over the
+   * current search scope, ignoring the filters themselves. Feeds the counts
+   * in the filter popover; only evaluated while something renders it.
+   */
+  const filterCounts = computed(() => {
+    const r = frozenRatings.value ?? ratings.value;
+    const scores = searchResults.value ? searchScores.value : null;
+    const photo = [0, 0, 0, 0, 0, 0];
+    const video = [0, 0, 0, 0, 0, 0];
+    for (const img of images.value) {
+      if (scores && !scores.has(img.id)) continue;
+      const stars = r.get(img.file_path) ?? 0;
+      const bucket = stars > 5 ? 5 : stars < 0 ? 0 : stars;
+      (img.media_type === "Video" ? video : photo)[bucket]++;
+    }
+    return { photo, video };
+  });
+
+  /** Media in the current scope (whole library or search results), before filters. */
+  const unfilteredCount = computed(() => {
+    if (!searchResults.value) return images.value.length;
+    const scores = searchScores.value;
+    let n = 0;
+    for (const img of images.value) if (scores.has(img.id)) n++;
+    return n;
   });
 
   const currentImage = computed(
     () => displayImages.value[currentIndex.value] ?? null
   );
 
+  /**
+   * After the list changed underneath us, point currentIndex back at the
+   * photo that was current (`prevList[prevIndex]`). If that photo is no
+   * longer listed, land on the nearest one that is, preferring the photos
+   * that came after it.
+   */
+  function reanchor(prevList: LibraryImage[], prevIndex: number) {
+    const list = displayImages.value;
+    const prev = prevList[prevIndex];
+    if (list.length === 0 || !prev) {
+      currentIndex.value = 0;
+      return;
+    }
+    const same = list.indexOf(prev);
+    if (same !== -1) {
+      currentIndex.value = same;
+      return;
+    }
+    const indexById = new Map<string, number>();
+    for (let i = 0; i < list.length; i++) indexById.set(list[i].id, i);
+    for (let d = 1; d < prevList.length; d++) {
+      const after = prevList[prevIndex + d];
+      const hitAfter = after && indexById.get(after.id);
+      if (hitAfter !== undefined) {
+        currentIndex.value = hitAfter;
+        return;
+      }
+      const before = prevList[prevIndex - d];
+      const hitBefore = before && indexById.get(before.id);
+      if (hitBefore !== undefined) {
+        currentIndex.value = hitBefore;
+        return;
+      }
+    }
+    currentIndex.value = 0;
+  }
+
   // Snapshot ratings the instant we enter single view, and drop the snapshot
   // on the way back to grid. flush: "sync" is required: the snapshot must be
   // in place before displayImages re-evaluates in the same tick as the
   // viewMode flip, otherwise the first read would still see live ratings.
+  //
+  // Dropping the snapshot re-sorts and re-filters with live ratings, so a
+  // photo rated below the rating filter in the viewer leaves the list here.
+  // Re-anchor currentIndex so it keeps pointing at the photo that was on
+  // screen (or its nearest surviving neighbour) rather than at whatever now
+  // occupies its old slot.
   watch(
     viewMode,
     (mode) => {
-      frozenRatings.value = mode === "single" ? new Map(ratings.value) : null;
+      if (mode === "single") {
+        frozenRatings.value = new Map(ratings.value);
+        // Nothing to show (empty search or filters): the viewer would render
+        // blank, so stay on the grid, which explains why it is empty.
+        if (displayImages.value.length === 0) viewMode.value = "grid";
+        return;
+      }
+      if (!frozenRatings.value) return;
+      const prevList = displayImages.value;
+      const prevIndex = currentIndex.value;
+      frozenRatings.value = null;
+      reanchor(prevList, prevIndex);
     },
     { flush: "sync" }
   );
 
-  const searchScores = computed(() => {
-    if (!searchResults.value) return new Map<string, number>();
-    return new Map(searchResults.value.map((r) => [r.image_id, r.score]));
-  });
+  /**
+   * Apply a filter change, keeping the current photo selected when it is
+   * still listed (else its nearest surviving neighbour). In single view the
+   * user just asked for a new list, so the ratings snapshot is refreshed to
+   * live ratings first; otherwise a photo rated in the viewer would be
+   * filtered by its old rating. If nothing matches, fall back to the grid,
+   * which explains the empty result and offers to clear the filters.
+   */
+  function changeFilters(apply: () => void) {
+    const prevList = displayImages.value;
+    const prevIndex = currentIndex.value;
+    apply();
+    if (frozenRatings.value) frozenRatings.value = new Map(ratings.value);
+    reanchor(prevList, prevIndex);
+    if (viewMode.value === "single" && displayImages.value.length === 0) {
+      viewMode.value = "grid";
+    }
+  }
+
+  function setRatingFilter(f: RatingFilter) {
+    if (f !== ratingFilter.value) changeFilters(() => (ratingFilter.value = f));
+  }
+
+  function setMediaFilter(f: MediaFilter) {
+    if (f !== mediaFilter.value) changeFilters(() => (mediaFilter.value = f));
+  }
+
+  function clearFilters() {
+    if (!isFiltered.value) return;
+    changeFilters(() => {
+      ratingFilter.value = "all";
+      mediaFilter.value = "all";
+    });
+  }
 
   // Rating helpers
   function getRating(filePath: string): number {
@@ -359,6 +506,8 @@ export const useLibraryStore = defineStore("library", () => {
     currentIndex,
     viewMode,
     sortBy,
+    ratingFilter,
+    mediaFilter,
     ratings,
     searchQuery,
     searchResults,
@@ -373,6 +522,9 @@ export const useLibraryStore = defineStore("library", () => {
     // Computed
     displayImages,
     currentImage,
+    isFiltered,
+    filterCounts,
+    unfilteredCount,
 
     // Actions
     loadLibrary,
@@ -384,5 +536,8 @@ export const useLibraryStore = defineStore("library", () => {
     buildSearchIndex,
     searchImages,
     clearSearch,
+    setRatingFilter,
+    setMediaFilter,
+    clearFilters,
   };
 });
