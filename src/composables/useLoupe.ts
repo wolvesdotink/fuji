@@ -30,21 +30,24 @@ import { registerLoupe, unregisterLoupe, type LoupeHandle } from "@/lib/loupeBus
  *   survives resizes, display changes and neighbours of another size.
  *
  * - Everything tied to one photo lives in a `PhotoRecord`: which `<img>` it
- *   is, its measured layout, whether its full-resolution decode is done, and
- *   input received before it could be zoomed. The record is replaced
- *   wholesale when the photo changes, so nothing from one photo (a late load
- *   event, a queued wheel zoom, a finishing decode) can land on the next.
+ *   is, its measured layout, whether its full-resolution decode is done,
+ *   whether it failed to load, and a zoom requested before it could be
+ *   zoomed. The record is replaced wholesale when the photo changes, so
+ *   nothing from one photo (a late load event, a pending request, a
+ *   finishing decode) can land on the next.
  *
  * At fit the `<img>` keeps its normal fitted layout and gets no inline
  * styles at all, so the fitted view renders exactly as before. Zoomed, it is
  * laid out once at its natural size and moved with `translate3d() scale()`
  * (see `zoomedStyle`), so panning and zooming never trigger layout.
  *
- * The 600 px thumbnail placeholder is never zoomed. Zoom input that arrives
- * before the full-res image has loaded is queued on the photo's record and
- * replayed in order once its size is known, through the same clamped path
- * as live input; meanwhile the indicator says the full-resolution image is
- * still loading.
+ * Before the full-resolution image has loaded its size is unknown, so zoom
+ * input can't be applied exactly. One simple rule instead: any zoom-in
+ * intent (click, Z, wheel in, pinch out) sets a single pending request, "go
+ * to 100% here" (the latest anchor wins; Z aims at the centre), shown with
+ * the loading indicator; any zoom-out intent, Esc, or leaving the photo
+ * clears it. When the image is ready the request is applied once. The 600 px
+ * thumbnail placeholder is never zoomed.
  */
 
 /** Highest zoom: one image pixel spread over 4×4 device pixels (400%). */
@@ -55,16 +58,15 @@ const TOGGLE_ZOOM = 1;
 const PINCH_SENSITIVITY = 0.01;
 /** Pointer travel (CSS px) after which a press counts as a drag, not a click. */
 const DRAG_THRESHOLD = 3;
-/** Zoom within this ratio of fit counts as fit. */
-const FIT_EPSILON = 1e-3;
-/** Most zoom steps queued for a photo that hasn't loaded yet. */
-const MAX_QUEUED = 64;
 /**
  * How long a photo must stay on screen before its full-resolution decode
  * starts (unless zoom is already engaged). Arrowing through a card doesn't
- * queue a 26 MP decode per photo.
+ * start a 26 MP decode per photo.
  */
 const DECODE_DWELL_MS = 300;
+/** Full-resolution decodes in flight at once: the current photo's, plus at
+ *  most one for a photo already left (decode() can't be cancelled). */
+const MAX_DECODES = 2;
 
 interface Layout {
   /** Viewport (stage) size in CSS px. */
@@ -81,15 +83,6 @@ interface Layout {
   dpr: number;
 }
 
-/**
- * Zoom input received before the photo could be zoomed. `toggle`: click / Z
- * at fit ("100% here"); `scale`: one wheel or pinch step. (fx, fy) is the
- * anchor as a fraction of the stage.
- */
-type QueuedInput =
-  | { kind: "toggle"; fx: number; fy: number }
-  | { kind: "scale"; factor: number; fx: number; fy: number };
-
 interface PhotoRecord {
   /** Photo identity (the viewer's image id). */
   id: string | undefined;
@@ -100,7 +93,11 @@ interface PhotoRecord {
    *  on demand). */
   decoded: boolean;
   decodeRequested: boolean;
-  queued: QueuedInput[];
+  /** The full-res image failed to load: nothing to wait for. */
+  failed: boolean;
+  /** "Go to 100% here", requested before the image could be zoomed;
+   *  (fx, fy) is the anchor as a fraction of the stage. */
+  pending: { fx: number; fy: number } | null;
 }
 
 const newRecord = (id: string | undefined): PhotoRecord => ({
@@ -109,13 +106,30 @@ const newRecord = (id: string | undefined): PhotoRecord => ({
   layout: null,
   decoded: false,
   decodeRequested: false,
-  queued: [],
+  failed: false,
+  pending: null,
 });
 
-// Full-resolution decodes run one at a time across the app. A queued job
-// whose photo has been left by the time its turn comes is skipped, and a
-// running one that is superseded has its result dropped by the caller.
-let decodeChain: Promise<void> = Promise.resolve();
+// Full-resolution decodes, app-wide. The current photo's decode starts at
+// once unless MAX_DECODES are already running (then it takes the next free
+// slot; only the latest waiting request is kept). Results for a photo that
+// is no longer current are ignored by the caller.
+let decodesInFlight = 0;
+let waitingDecode: (() => void) | null = null;
+
+function scheduleDecode(job: () => Promise<void>) {
+  const run = () => {
+    decodesInFlight++;
+    job().finally(() => {
+      decodesInFlight--;
+      const next = waitingDecode;
+      waitingDecode = null;
+      next?.();
+    });
+  };
+  if (decodesInFlight < MAX_DECODES) run();
+  else waitingDecode = run;
+}
 
 export interface LoupeOptions {
   /** The element zoom input is bound to (the viewer's image container). */
@@ -126,6 +140,8 @@ export interface LoupeOptions {
   image: Ref<HTMLImageElement | null>;
   /** True once the current full-resolution image has loaded. */
   ready: Ref<boolean>;
+  /** True if the current full-resolution image failed to load. */
+  failed: Ref<boolean>;
   /** False for videos: the loupe resets and ignores all input. */
   enabled: Ref<boolean>;
 }
@@ -136,14 +152,15 @@ interface GestureLikeEvent extends UIEvent {
   clientY: number;
 }
 
-export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions) {
+export function useLoupe({ stage, photoId, image, ready, failed, enabled }: LoupeOptions) {
   // Committed (reactive) view state — drives the transform and indicator.
   const zoom = ref<number | null>(null);
   const centerX = ref(0.5);
   const centerY = ref(0.5);
-  const queuedKind = ref<"toggle" | "scale" | null>(null);
+  const hasPending = ref(false);
   const dragging = ref(false);
-  /** Bumped whenever the current record's layout or decode state changes. */
+  /** Bumped whenever the current record's layout, decode or load state
+   *  changes. */
   const recordVersion = ref(0);
 
   // Pending view state, written synchronously by input handlers and
@@ -153,19 +170,14 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   let pCy = 0.5;
 
   let rec: PhotoRecord = newRecord(photoId.value);
-
-  const kindOf = (r: PhotoRecord) =>
-    r.queued.length === 0
-      ? null
-      : r.queued.some((q) => q.kind === "scale")
-        ? "scale"
-        : "toggle";
+  /** Trackpad pinch in progress (see onGestureChange). */
+  let gesture: { refZoom: number | null; refScale: number; lastScale: number } | null = null;
 
   const frame = createFrameCommit(() => {
     zoom.value = pZoom;
     centerX.value = pCx;
     centerY.value = pCy;
-    queuedKind.value = kindOf(rec);
+    hasPending.value = rec.pending !== null;
   });
 
   // --- geometry -----------------------------------------------------------
@@ -202,14 +214,19 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     pZoom = null;
     pCx = 0.5;
     pCy = 0.5;
-    rec.queued = [];
+    rec.pending = null;
   }
 
-  /** Zoom to `target` (clamped), keeping the image point under (ax, ay). */
+  /**
+   * Zoom to `target`, keeping the image point under (ax, ay) in place.
+   * "At fit" is a clamp on the result: only a target at or below fit lands
+   * on fit; any target above it, however slightly, is kept, so slow wheel or
+   * pinch movement near fit is never thrown away.
+   */
   function zoomAt(l: Layout, target: number, ax: number, ay: number) {
     const z = pZoom ?? fitZoom(l);
     const next = clamp(target, fitZoom(l), maxZoom(l));
-    if (next <= fitZoom(l) * (1 + FIT_EPSILON)) {
+    if (next <= fitZoom(l)) {
       setFit();
       return;
     }
@@ -222,7 +239,7 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   function revalidate(l: Layout) {
     if (pZoom === null) return;
     const z = clamp(pZoom, fitZoom(l), maxZoom(l));
-    if (z <= fitZoom(l) * (1 + FIT_EPSILON)) {
+    if (z <= fitZoom(l)) {
       setFit();
     } else {
       const s = spans(l, z, pCx, pCy);
@@ -230,53 +247,18 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     }
   }
 
-  /** Apply one zoom step now (`l` known) — the single path for live and
-   *  replayed input, so both clamp per step identically. */
-  function applyInput(l: Layout, q: QueuedInput) {
-    const ax = q.fx * l.vw;
-    const ay = q.fy * l.vh;
-    if (q.kind === "toggle") {
-      if (pZoom === null) zoomAt(l, toggleZoom(l), ax, ay);
-      else setFit();
+  /**
+   * Zoom intent before the image can be zoomed. In: "100% here" (latest
+   * anchor wins) — unless a zoom carried over from the previous photo is
+   * already waiting to apply, which it then keeps. Out: back to fit,
+   * dropping the request (and a carried zoom).
+   */
+  function preloadIntent(zoomIn: boolean, fx: number, fy: number) {
+    if (zoomIn) {
+      if (pZoom === null) rec.pending = { fx, fy };
     } else {
-      zoomAt(l, (pZoom ?? fitZoom(l)) * q.factor, ax, ay);
+      setFit();
     }
-  }
-
-  /** Route an input to the live path or this photo's queue. */
-  function input(q: QueuedInput) {
-    const l = rec.layout;
-    if (l) {
-      applyInput(l, q);
-    } else {
-      rec.queued.push(q);
-      // Bounded: fold the oldest two scale steps into one if it grows.
-      if (rec.queued.length > MAX_QUEUED) {
-        const i = rec.queued.findIndex((x) => x.kind === "scale");
-        const j = i < 0 ? -1 : rec.queued.findIndex((x, k) => k > i && x.kind === "scale");
-        if (i >= 0 && j >= 0) {
-          const a = rec.queued[i] as Extract<QueuedInput, { kind: "scale" }>;
-          const b = rec.queued[j] as Extract<QueuedInput, { kind: "scale" }>;
-          rec.queued.splice(j, 1, { ...b, factor: a.factor * b.factor });
-          rec.queued.splice(i, 1);
-        } else {
-          rec.queued.shift();
-        }
-      }
-      // From fit, a queue that never gets above fit (clamping at fit, the
-      // one bound known before load) can only replay to fit: drop it rather
-      // than show a loading state for a zoom that won't happen. The upper
-      // bound only ever lowers the result, so this is exact.
-      if (pZoom === null && rec.queued.every((x) => x.kind === "scale")) {
-        let level = 1;
-        for (const x of rec.queued) {
-          if (x.kind === "scale") level = Math.max(1, level * x.factor);
-        }
-        if (level <= 1 + FIT_EPSILON) rec.queued = [];
-      }
-    }
-    // Zoom intent: don't make the user wait out the decode dwell.
-    requestDecode(true);
   }
 
   function measure() {
@@ -309,13 +291,19 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
       dpr: window.devicePixelRatio || 1,
     };
     if (l.vw === 0 || l.vh === 0) return;
+    const firstLayout = rec.layout === null;
     rec.layout = l;
 
     revalidate(l);
-    // Replay this photo's queued input, in order, through the live path.
-    const queued = rec.queued;
-    rec.queued = [];
-    for (const q of queued) applyInput(l, q);
+    // Apply the pending "100% here" request once.
+    const req = rec.pending;
+    if (req) {
+      rec.pending = null;
+      pZoom = null;
+      zoomAt(l, toggleZoom(l), req.fx * l.vw, req.fy * l.vh);
+    }
+    // A pinch that was in progress continues from here.
+    if (firstLayout && gesture) rebaseGesture(l);
 
     frame.flush();
     recordVersion.value++;
@@ -328,8 +316,8 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   // natural size for the first zoom would force a synchronous full decode
   // on the next paint. So the current photo is decoded at full size off the
   // main thread — after it has stayed on screen for DECODE_DWELL_MS, or at
-  // once when zoom is engaged — one decode at a time app-wide. Zoom is shown
-  // once its photo's decode is done; until then it reads as loading.
+  // once when zoom is engaged. Zoom is shown once its photo's decode is
+  // done; until then it reads as loading.
 
   let dwellTimer: number | null = null;
 
@@ -356,11 +344,11 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     }
     clearDwell();
     r.decodeRequested = true;
-    decodeChain = decodeChain.then(async () => {
-      // Left this photo while waiting for our turn: skip the work entirely.
+    scheduleDecode(async () => {
+      // Left this photo while waiting for a slot: skip the work entirely.
       if (r !== rec || r.el !== img) return;
       await img.decode().catch(() => {});
-      // Superseded while decoding: drop the result.
+      // Superseded while decoding: ignore the result.
       if (r !== rec || r.el !== img) return;
       r.decoded = true;
       // Re-measure: layout may have changed while decoding, and this is the
@@ -369,7 +357,7 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     });
   }
 
-  const engaged = () => pZoom !== null || rec.queued.length > 0;
+  const engaged = () => pZoom !== null || rec.pending !== null;
 
   // --- derived view state -------------------------------------------------
 
@@ -425,7 +413,7 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   );
 
   /** Zoom requested (or in effect), possibly still waiting for full-res. */
-  const isZoomed = computed(() => zoom.value !== null || queuedKind.value !== null);
+  const isZoomed = computed(() => zoom.value !== null || hasPending.value);
 
   /** For the thumbnail placeholder: it can be clicked to request a zoom. */
   const placeholderStyle = computed<CSSProperties>(() => ({
@@ -436,15 +424,22 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     isApplied.value ? { cursor: dragging.value ? "grabbing" : "grab" } : {}
   );
 
-  /** Zoom requested, full-res image not loaded/decoded yet. */
-  const loading = computed(() => isZoomed.value && !isApplied.value);
+  /** This photo's full-res image failed: there is nothing to wait for. */
+  const photoFailed = computed(() => {
+    void recordVersion.value;
+    return rec.failed;
+  });
 
-  /** Zoom level for the indicator, e.g. 100; null at fit, and while queued
-   *  wheel/pinch input waits for the image (its level depends on the
-   *  image's size, so there is no honest number to show yet). */
+  /** Zoom requested, full-res image not loaded/decoded yet. */
+  const loading = computed(
+    () => isZoomed.value && !isApplied.value && !photoFailed.value
+  );
+
+  /** Zoom level for the indicator, e.g. 100; null at fit, and when this
+   *  photo's full-res image failed to load. */
   const percent = computed(() => {
-    if (queuedKind.value === "scale") return null;
-    if (queuedKind.value === "toggle") return TOGGLE_ZOOM * 100;
+    if (photoFailed.value) return null;
+    if (hasPending.value) return TOGGLE_ZOOM * 100;
     return zoom.value === null ? null : Math.round(zoom.value * 100);
   });
 
@@ -456,14 +451,17 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     frame.flush();
   }
 
-  /** Fit → toggle zoom at (fx, fy) (fractions of the stage); zoomed → fit. */
+  /** Fit → 100% at (fx, fy) (fractions of the stage); zoomed → fit. */
   function toggleAt(fx: number, fy: number) {
     if (!enabled.value) return;
     if (engaged()) {
       reset();
       return;
     }
-    input({ kind: "toggle", fx, fy });
+    const l = rec.layout;
+    if (l) zoomAt(l, toggleZoom(l), fx * l.vw, fy * l.vh);
+    else preloadIntent(true, fx, fy);
+    requestDecode(true);
     frame.flush();
   }
 
@@ -478,6 +476,8 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   function stagePoint(e: { clientX: number; clientY: number }) {
     const rect = stage.value!.getBoundingClientRect();
     return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
       fx: (e.clientX - rect.left) / rect.width,
       fy: (e.clientY - rect.top) / rect.height,
     };
@@ -488,50 +488,69 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     return target instanceof Element && !!target.closest("button, .ptp-download");
   }
 
-  // Safari/WKWebView reports trackpad pinch as GestureEvents; other engines
-  // (and possibly some WebKit builds) send ctrl+wheel. Handle both, and while
-  // a gesture is live ignore ctrl+wheel so a pinch can't apply twice.
-  // Gestures are applied as incremental ratios (scale / previous scale), so
-  // a pinch keeps one consistent baseline even if the photo finishes loading
-  // mid-gesture.
-  let gestureActive = false;
-  let gestureLastScale = 1;
-
   function onWheel(e: WheelEvent) {
     if (!enabled.value || !stage.value) return;
     e.preventDefault();
-    if (e.ctrlKey && gestureActive) return;
+    if (e.ctrlKey && gesture) return;
     // deltaMode 1 = lines (some mice): roughly 16 px per line.
     const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    if (dy === 0) return;
     const factor = wheelZoomFactor(
       dy,
       e.ctrlKey ? PINCH_SENSITIVITY : undefined
     );
-    input({ kind: "scale", factor, ...stagePoint(e) });
+    const p = stagePoint(e);
+    const l = rec.layout;
+    if (l) zoomAt(l, (pZoom ?? fitZoom(l)) * factor, p.x, p.y);
+    else preloadIntent(factor > 1, p.fx, p.fy);
+    if (engaged()) requestDecode(true);
     frame.schedule();
+  }
+
+  // Trackpad pinch. Safari/WKWebView reports it as GestureEvents; other
+  // engines (and possibly some WebKit builds) send ctrl+wheel. Handle both,
+  // and while a gesture is live ignore ctrl+wheel so a pinch can't apply
+  // twice.
+  //
+  // A gesture's zoom is derived from a reference — the zoom and the gesture
+  // scale at its start, or at the last re-base — so it is exact however
+  // slowly the fingers move: zoom = refZoom × scale / refScale, clamped.
+  // The reference is re-based when the photo becomes zoomable mid-gesture
+  // (at the zoom just applied and the gesture's current scale).
+
+  function rebaseGesture(l: Layout) {
+    if (!gesture) return;
+    gesture.refZoom = pZoom ?? fitZoom(l);
+    gesture.refScale = gesture.lastScale;
   }
 
   function onGestureStart(e: Event) {
     if (!enabled.value) return;
     e.preventDefault();
-    gestureActive = true;
-    gestureLastScale = 1;
+    const l = rec.layout;
+    gesture = { refZoom: l ? (pZoom ?? fitZoom(l)) : null, refScale: 1, lastScale: 1 };
   }
 
   function onGestureChange(e: Event) {
-    if (!enabled.value || !stage.value) return;
+    if (!enabled.value || !stage.value || !gesture) return;
     e.preventDefault();
     const g = e as GestureLikeEvent;
     if (!(g.scale > 0)) return;
-    const factor = g.scale / gestureLastScale;
-    gestureLastScale = g.scale;
-    input({ kind: "scale", factor, ...stagePoint(g) });
+    const p = stagePoint(g);
+    const l = rec.layout;
+    if (l && gesture.refZoom !== null) {
+      zoomAt(l, (gesture.refZoom * g.scale) / gesture.refScale, p.x, p.y);
+    } else if (g.scale !== gesture.lastScale) {
+      preloadIntent(g.scale > gesture.lastScale, p.fx, p.fy);
+    }
+    gesture.lastScale = g.scale;
+    if (engaged()) requestDecode(true);
     frame.schedule();
   }
 
   function onGestureEnd(e: Event) {
     e.preventDefault();
-    gestureActive = false;
+    gesture = null;
   }
 
   // --- press / drag -------------------------------------------------------
@@ -539,8 +558,9 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   // Pointer events with pointer capture once a pan starts, so the drag
   // follows the pointer outside the window. A drag ends on pointerup, on
   // pointercancel / lostpointercapture, when the window loses focus (app
-  // switch mid-drag), or on any move that arrives without the primary
-  // button held — never left "stuck" waiting for a mouseup that won't come.
+  // switch mid-drag), on any move that arrives without the primary button
+  // held, or when the photo changes — never left "stuck" waiting for a
+  // mouseup that won't come.
   //
   // Capture is taken only once the press turns into a pan, so a plain click
   // keeps its real target (the click handler needs to know whether it
@@ -709,11 +729,13 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
   );
 
   // A new photo gets a fresh record: its predecessor's layout, decode state
-  // and queued input go with it. The view zoom is kept (see the header).
+  // and pending request go with it, and so does any drag in progress. The
+  // view zoom is kept (see the header).
   watch(
     photoId,
     (id) => {
       if (id === rec.id) return;
+      endDrag();
       clearDwell();
       rec = newRecord(id);
       frame.flush();
@@ -724,7 +746,8 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
 
   // Attach the current photo's <img> and measure once it has loaded. A
   // different element for the same photo (e.g. after a PTP download) keeps
-  // the record's queued input but resets what was measured for the old one.
+  // the record's pending request but resets what was measured for the old
+  // one.
   watch(
     [image, ready],
     () => {
@@ -734,6 +757,7 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
         rec.layout = null;
         rec.decoded = false;
         rec.decodeRequested = false;
+        rec.failed = false;
         clearDwell();
       }
       measure();
@@ -741,6 +765,16 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     },
     { flush: "post" }
   );
+
+  // The current full-res image failed to load: drop the pending request
+  // and stop showing a loading state that can't end.
+  watch(failed, (f) => {
+    if (!f) return;
+    rec.failed = true;
+    rec.pending = null;
+    frame.flush();
+    recordVersion.value++;
+  });
 
   // The stage can move without resizing (it is re-laid out with the window),
   // which shifts its device-pixel phase; re-measure on window resize too.
@@ -776,7 +810,7 @@ export function useLoupe({ stage, photoId, image, ready, enabled }: LoupeOptions
     frame.cancel();
     endDrag();
     clearDwell();
-    // Any decode still queued for this viewer is skipped: the record is
+    // Any decode still waiting for this viewer is skipped: the record is
     // no longer current once replaced.
     rec = newRecord(undefined);
     resizeObserver?.disconnect();

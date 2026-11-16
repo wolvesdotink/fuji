@@ -144,12 +144,14 @@ const thumbnailSrc = computed(() => {
 });
 
 const fullResLoaded = ref(false);
+const fullResFailed = ref(false);
 
 // Reset loaded state when navigating to a new image
 watch(
   () => image.value?.id,
   () => {
     fullResLoaded.value = false;
+    fullResFailed.value = false;
   }
 );
 
@@ -157,6 +159,10 @@ watch(
 // element from the photo we just left can still finish loading afterwards.
 function onFullResLoad(e: Event) {
   if (e.target === fullImgEl.value) fullResLoaded.value = true;
+}
+
+function onFullResError(e: Event) {
+  if (e.target === fullImgEl.value) fullResFailed.value = true;
 }
 
 // Loupe (fit ↔ 100%, wheel/pinch zoom, drag-pan) for stills. Zoom persists
@@ -169,6 +175,7 @@ const loupe = useLoupe({
   photoId: computed(() => image.value?.id),
   image: fullImgEl,
   ready: fullResLoaded,
+  failed: fullResFailed,
   enabled: computed(() => image.value?.media_type === "Image"),
 });
 
@@ -313,6 +320,7 @@ function onRating(r: number) {
         decoding="async"
         draggable="false"
         @load="onFullResLoad"
+        @error="onFullResError"
       />
 
       <!-- Dropped while zoomed: darkened corners would skew the judgement
