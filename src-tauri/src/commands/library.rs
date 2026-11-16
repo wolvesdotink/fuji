@@ -8,11 +8,11 @@ use walkdir::WalkDir;
 
 use crate::clip;
 use crate::clip::engine::ClipEngine;
-use crate::commands::thumbnails::{default_workers, generate_thumbnail_batch};
+use crate::commands::thumbnails::{generate_thumbnail_batch, ThumbnailPool};
 use crate::index;
 use crate::models::{
     IndexFingerprint, IndexProgress, LibraryImage, MediaType, ModelDownloadProgress, SearchResult,
-    ThumbnailBatch,
+    ThumbnailBatch, ThumbnailResult,
 };
 
 /// List photos and videos from a destination/library directory.
@@ -160,13 +160,13 @@ pub async fn generate_library_thumbnails(
     image_ids: Vec<String>,
     cache_dir: String,
     on_progress: Channel<ThumbnailBatch>,
-) -> Result<(), String> {
+) -> Result<ThumbnailResult, String> {
     tokio::task::spawn_blocking(move || {
         generate_thumbnail_batch(
             &image_ids,
             &image_paths,
             Path::new(&cache_dir),
-            default_workers(),
+            ThumbnailPool::global(),
             &|batch| {
                 let _ = on_progress.send(batch);
             },

@@ -8,8 +8,8 @@
 //! Every file in the sample dir (non-recursive) is grouped by extension. For
 //! each group and each worker count, thumbnails are generated cold into a fresh
 //! temp cache `FUJI_THUMB_BENCH_RUNS` times (default 3), reporting the median
-//! wall time. Each output is checked: it decodes with the `image` crate, is at
-//! most 600px wide, has the source's displayed (rotated) aspect ratio, and is
+//! wall time. Each output is checked: it decodes with the `image` crate, is
+//! 600px wide (599 for off-ratio sources), has the source's displayed (rotated) aspect ratio, and is
 //! not a blank frame.
 //! Finally a warm run over a synthetic 3000-entry cache counts progress
 //! messages. Optional env:
@@ -24,7 +24,9 @@ use std::time::Instant;
 
 use tauri::ipc::Channel;
 
-use super::thumbnails::{generate_thumbnail_batch, thumb_file_name, THUMBNAIL_MAX_WIDTH};
+use super::thumbnails::{
+    generate_thumbnail_batch, thumb_file_name, ThumbnailPool, MAX_VIDEO_JOBS, THUMBNAIL_MAX_WIDTH,
+};
 use crate::imageio;
 use crate::models::ThumbnailBatch;
 use crate::raf::preview;
@@ -62,7 +64,8 @@ fn run_batch(ids: &[String], sources: &[String], cache: &Path, workers: usize) -
         Ok(())
     });
     let start = Instant::now();
-    generate_thumbnail_batch(ids, sources, cache, workers, &|batch| {
+    let pool = ThumbnailPool::new(workers, MAX_VIDEO_JOBS);
+    generate_thumbnail_batch(ids, sources, cache, &pool, &|batch| {
         let _ = channel.send(batch);
     })
     .unwrap();
@@ -107,7 +110,15 @@ fn check_outputs(ids: &[String], sources: &[String], cache: &Path) {
         );
         let (sw, sh) = displayed_size(Path::new(source));
         let expected_w = sw.min(THUMBNAIL_MAX_WIDTH);
-        assert_eq!(img.width(), expected_w, "{} width", id);
+        // The size limit is rounded down so the width never exceeds the cap;
+        // off-ratio sources can land one pixel narrower.
+        assert!(
+            img.width() <= expected_w && img.width() + 1 >= expected_w,
+            "{} width {} vs {}",
+            id,
+            img.width(),
+            expected_w
+        );
         let expected_h = sh as f64 * expected_w as f64 / sw as f64;
         assert!(
             (img.height() as f64 - expected_h).abs() <= 2.0,
