@@ -2,6 +2,7 @@
 import { ref, watch, onUnmounted } from "vue";
 import { useLibraryStore } from "@/stores/library";
 import LibraryCard from "./LibraryCard.vue";
+import { describeFilters } from "@/lib/libraryFilter";
 
 const store = useLibraryStore();
 
@@ -73,7 +74,19 @@ onUnmounted(() => {
 
     <!-- Empty state (no media, not loading) -->
     <div class="empty-library" v-if="store.displayImages.length === 0 && !store.isLoading">
-      <p class="empty-text" v-if="store.searchQuery">
+      <!-- Filters hid everything that would otherwise show -->
+      <div class="empty-filtered" v-if="store.isFiltered && store.unfilteredCount > 0">
+        <svg class="empty-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M3 5h18M6.5 12h11M10 19h4" />
+        </svg>
+        <p class="empty-title">Nothing matches these filters</p>
+        <p class="empty-detail">
+          {{ describeFilters(store.ratingFilter, store.mediaFilter) }} in {{ store.unfilteredCount }}
+          {{ store.searchQuery ? `results for "${store.searchQuery}"` : "media" }}
+        </p>
+        <button class="empty-clear" type="button" @click="store.clearFilters()">Clear filters</button>
+      </div>
+      <p class="empty-text" v-else-if="store.searchQuery">
         No results for "{{ store.searchQuery }}"
       </p>
       <p class="empty-text" v-else>No photos or videos found in this folder</p>
@@ -129,6 +142,51 @@ onUnmounted(() => {
 .empty-text {
   font-size: 14px;
   color: var(--color-text-muted);
+}
+
+.empty-filtered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  animation: fadeIn 0.3s ease both;
+}
+
+.empty-icon {
+  color: var(--color-accent);
+  opacity: 0.7;
+  margin-bottom: 14px;
+}
+
+.empty-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.empty-detail {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.empty-clear {
+  margin-top: 18px;
+  padding: 7px 16px;
+  background: var(--color-accent-dim);
+  border: 1px solid rgba(196, 162, 78, 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--color-accent);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.empty-clear:hover {
+  background: rgba(196, 162, 78, 0.18);
+  color: var(--color-accent-hover);
 }
 
 /* Loading indicator */

@@ -36,6 +36,7 @@ The app is signed and notarized, so macOS will open it without warnings on first
 ### Library Browser
 - **Browse imported media** — View and re-rate any folder of previously imported photos and videos
 - **Sort by date or stars** — Multiple sort orders to find photos quickly
+- **Filter by rating and media type** — Show only N stars and up, only unrated media, or only photos or videos. Filters combine with every sort order and with search, and rating a photo in the viewer never pulls it out from under you
 - **AI-powered semantic search** — Type natural language queries like "golden hour landscape" or "portrait with bokeh" and find matching photos using a local CLIP model (no internet required after first download)
 - **CLIP index** — Automatically built in the background after each library load; the model runs entirely on-device
 
