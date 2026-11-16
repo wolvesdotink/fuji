@@ -7,6 +7,7 @@ import {
   activeVideoPlayer,
   type VideoPlayerHandle,
 } from "@/lib/videoPlayerBus";
+import { activeLoupe } from "@/lib/loupeBus";
 
 /**
  * The grid card's thumbnail container for the item at `index` in the grid's
@@ -167,6 +168,9 @@ export function useKeyboardNav() {
           const sourceEl = libraryStore.viewMode === "grid"
             ? gridThumbnail(".library-grid", libraryStore.currentIndex)
             : null;
+          // Leaving the viewer zoomed: drop to fit first so the morph back
+          // to the grid card starts from the whole frame, not a 100% crop.
+          activeLoupe.value?.reset();
           startTransition(libImg.id, () => {
             libraryStore.viewMode =
               libraryStore.viewMode === "grid" ? "single" : "grid";
@@ -174,6 +178,12 @@ export function useKeyboardNav() {
         }
         break;
       }
+      case "z":
+      case "Z":
+        if (libraryStore.viewMode !== "single") break;
+        e.preventDefault();
+        activeLoupe.value?.toggle();
+        break;
       case "/":
         e.preventDefault();
         // Focus the search input
@@ -181,7 +191,10 @@ export function useKeyboardNav() {
         break;
       case "Escape":
         e.preventDefault();
-        if (libraryStore.viewMode === "single") {
+        // Zoomed in: the first Esc only returns to fit.
+        if (libraryStore.viewMode === "single" && activeLoupe.value?.isZoomed()) {
+          activeLoupe.value.reset();
+        } else if (libraryStore.viewMode === "single") {
           const libEscImg = libraryStore.currentImage;
           if (libEscImg) {
             startTransition(libEscImg.id, () => {
@@ -271,6 +284,7 @@ export function useKeyboardNav() {
           const sourceEl = galleryStore.viewMode === "grid"
             ? gridThumbnail(".image-grid", galleryStore.currentIndex)
             : null;
+          activeLoupe.value?.reset();
           startTransition(camImg.id, () => {
             galleryStore.viewMode =
               galleryStore.viewMode === "grid" ? "single" : "grid";
@@ -278,6 +292,19 @@ export function useKeyboardNav() {
         }
         break;
       }
+      case "z":
+      case "Z":
+        if (galleryStore.viewMode !== "single") break;
+        e.preventDefault();
+        activeLoupe.value?.toggle();
+        break;
+      case "Escape":
+        // Compare mode handled Esc above; in single view it only unzooms.
+        if (galleryStore.viewMode === "single" && activeLoupe.value?.isZoomed()) {
+          e.preventDefault();
+          activeLoupe.value.reset();
+        }
+        break;
       // Compare mode
       case "m":
       case "M": {

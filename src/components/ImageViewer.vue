@@ -3,8 +3,10 @@ import { computed, ref, watch } from "vue";
 import { useGalleryStore } from "@/stores/gallery";
 import { fileUrl } from "@/lib/commands";
 import { decodeAhead } from "@/composables/useHoverPreload";
+import { useLoupe } from "@/composables/useLoupe";
 import StarRating from "@/components/StarRating.vue";
 import VideoPlayer from "@/components/VideoPlayer.vue";
+import LoupeIndicator from "@/components/LoupeIndicator.vue";
 
 const store = useGalleryStore();
 
@@ -142,18 +144,40 @@ const thumbnailSrc = computed(() => {
 });
 
 const fullResLoaded = ref(false);
+const fullResFailed = ref(false);
 
 // Reset loaded state when navigating to a new image
 watch(
   () => image.value?.id,
   () => {
     fullResLoaded.value = false;
+    fullResFailed.value = false;
   }
 );
 
-function onFullResLoad() {
-  fullResLoaded.value = true;
+// Only the current full-res <img> may mark the photo loaded: a detached
+// element from the photo we just left can still finish loading afterwards.
+function onFullResLoad(e: Event) {
+  if (e.target === fullImgEl.value) fullResLoaded.value = true;
 }
+
+function onFullResError(e: Event) {
+  if (e.target === fullImgEl.value) fullResFailed.value = true;
+}
+
+// Loupe (fit ↔ 100%, wheel/pinch zoom, drag-pan) for stills. Zoom persists
+// while navigating so a burst can be compared at the same spot; it resets
+// when the viewer closes (the component unmounts).
+const stageEl = ref<HTMLElement | null>(null);
+const fullImgEl = ref<HTMLImageElement | null>(null);
+const loupe = useLoupe({
+  stage: stageEl,
+  photoId: computed(() => image.value?.id),
+  image: fullImgEl,
+  ready: fullResLoaded,
+  failed: fullResFailed,
+  enabled: computed(() => image.value?.media_type === "Image"),
+});
 
 // Adjacent image decode-ahead: warm prev, next, and next+1 so the swap to
 // full-res is instant. decodeAhead runs img.decode() off the nav path and
@@ -210,6 +234,7 @@ function onRating(r: number) {
     <!-- Navigation arrows -->
     <button
       class="nav-btn nav-prev"
+      aria-label="Previous image"
       @click="store.navigatePrev()"
       :disabled="store.currentIndex === 0"
     >
@@ -220,6 +245,7 @@ function onRating(r: number) {
 
     <button
       class="nav-btn nav-next"
+      aria-label="Next image"
       @click="store.navigateNext()"
       :disabled="store.currentIndex === store.images.length - 1"
     >
@@ -229,7 +255,12 @@ function onRating(r: number) {
     </button>
 
     <!-- Main image area -->
-    <div class="image-container" style="view-transition-name: hero-image">
+    <div
+      ref="stageEl"
+      class="image-container"
+      style="view-transition-name: hero-image"
+      :style="loupe.stageStyle.value"
+    >
       <!-- Thumbnail placeholder (instant) -->
       <img
         v-if="thumbnailSrc && !fullResLoaded"
@@ -237,6 +268,8 @@ function onRating(r: number) {
         :alt="image.id"
         class="preview-image"
         :key="'thumb-' + image.id"
+        :style="loupe.placeholderStyle.value"
+        draggable="false"
       />
 
       <!-- PTP download card. Shown over the thumbnail (not only in its
@@ -282,11 +315,22 @@ function onRating(r: number) {
         :alt="image.id"
         :class="['full-image', { loaded: fullResLoaded }]"
         :key="'full-' + image.id"
+        :style="loupe.imageStyle.value"
+        ref="fullImgEl"
         decoding="async"
+        draggable="false"
         @load="onFullResLoad"
+        @error="onFullResError"
       />
 
-      <div class="vignette"></div>
+      <!-- Dropped while zoomed: darkened corners would skew the judgement
+           of exactly the pixels being inspected. -->
+      <div :class="['vignette', { 'vignette-off': loupe.isApplied.value }]"></div>
+
+      <LoupeIndicator
+        :percent="loupe.percent.value"
+        :loading="loupe.loading.value"
+      />
     </div>
 
     <!-- Bottom bar -->
@@ -337,6 +381,12 @@ function onRating(r: number) {
             <kbd class="key-hint-inline">Space</kbd> next unrated
             <span class="hint-sep">&middot;</span>
             <kbd class="key-hint-inline">M</kbd> mark
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">Z</kbd> zoom
+          </template>
+          <template v-if="loupe.isZoomed.value">
+            <span class="hint-sep">&middot;</span>
+            <kbd class="key-hint-inline">Esc</kbd> fit
           </template>
           <template v-if="markedCount >= 2">
             <span class="hint-sep">&middot;</span>
@@ -404,6 +454,11 @@ function onRating(r: number) {
   inset: 0;
   pointer-events: none;
   background: radial-gradient(ellipse at center, transparent 60%, rgba(5, 5, 4, 0.35) 100%);
+  transition: opacity var(--transition-medium);
+}
+
+.vignette-off {
+  opacity: 0;
 }
 
 /* Navigation buttons */
