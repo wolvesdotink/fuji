@@ -148,6 +148,11 @@ export function useKeyboardNav() {
     const count = nav.count();
     if (count === 0) return false;
 
+    // Shift + a navigation key or Enter is not a plain move or open (it is
+    // how a selection would be extended); leave it alone. Shift + letter
+    // shortcuts (G) are unaffected.
+    if (e.shiftKey && (isCursorKey(e.key) || e.key === "Enter")) return true;
+
     if (isCursorKey(e.key)) {
       e.preventDefault();
       const cursor = activeGridCursor.value;

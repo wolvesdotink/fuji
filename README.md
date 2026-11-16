@@ -103,7 +103,7 @@ Scroll or pinch to zoom anywhere between fit and 400%, and drag to pan. The
 zoom level and position are kept while you step through photos with `←` / `→`,
 so you can compare focus across a burst, and reset when you leave the viewer.
 
-Keys with `Cmd`, `Ctrl` or `Alt` held are left to macOS. Keys don't reach the grid while you type in the search field or while the camera prompt or the import screen is open.
+In grid view, keys with `Cmd`, `Ctrl` or `Alt` held are left to macOS, as are `Shift` + navigation keys and `Shift` + `Enter`. Keys don't reach the grid while you type in the search field or while the camera prompt or the import screen is open.
 
 ---
 
