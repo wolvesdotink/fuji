@@ -105,7 +105,7 @@ function openInViewer(e: MouseEvent) {
 
 <template>
   <div :class="['image-card', borderClass]" @click="openInViewer" @mouseenter="onMouseEnter" @mouseleave="cancelPreload">
-    <div class="thumbnail-container" :data-image-id="image.id" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
+    <div class="thumbnail-container" :data-index="index" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
       <!-- Shimmer skeleton while the thumbnail generates -->
       <div v-if="!hasThumbnail" class="thumbnail-skeleton">
         <div class="skeleton-shimmer"></div>

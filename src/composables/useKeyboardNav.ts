@@ -9,14 +9,16 @@ import {
 } from "@/lib/videoPlayerBus";
 
 /**
- * The grid card's thumbnail container for `imageId`, used as the hero of the
- * grid→viewer morph. The grids are windowed, so the card is only in the DOM
- * when its row is near the viewport; null otherwise, and the transition falls
- * back to a plain cross-fade.
+ * The grid card's thumbnail container for the item at `index` in the grid's
+ * current list, used as the hero of the grid→viewer morph. Looked up by index
+ * rather than image id: ids are file stems, which repeat across folders in a
+ * recursive library scan. The grids are windowed, so the card is only in the
+ * DOM when its row is near the viewport; null otherwise, and the transition
+ * falls back to a plain cross-fade.
  */
-function gridThumbnail(gridSelector: string, imageId: string): HTMLElement | null {
+function gridThumbnail(gridSelector: string, index: number): HTMLElement | null {
   return document.querySelector<HTMLElement>(
-    `${gridSelector} .thumbnail-container[data-image-id="${CSS.escape(imageId)}"]`
+    `${gridSelector} .thumbnail-container[data-index="${index}"]`
   );
 }
 
@@ -163,7 +165,7 @@ export function useKeyboardNav() {
         if (libImg) {
           // Find the card's container for imperative tagging (grid→single only)
           const sourceEl = libraryStore.viewMode === "grid"
-            ? gridThumbnail(".library-grid", libImg.id)
+            ? gridThumbnail(".library-grid", libraryStore.currentIndex)
             : null;
           startTransition(libImg.id, () => {
             libraryStore.viewMode =
@@ -267,7 +269,7 @@ export function useKeyboardNav() {
         const camImg = galleryStore.currentImage;
         if (camImg) {
           const sourceEl = galleryStore.viewMode === "grid"
-            ? gridThumbnail(".image-grid", camImg.id)
+            ? gridThumbnail(".image-grid", galleryStore.currentIndex)
             : null;
           startTransition(camImg.id, () => {
             galleryStore.viewMode =
