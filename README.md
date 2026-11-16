@@ -36,6 +36,7 @@ The app is signed and notarized, so macOS will open it without warnings on first
 ### Library Browser
 - **Browse imported media** — View and re-rate any folder of previously imported photos and videos
 - **Sort by date or stars** — Multiple sort orders to find photos quickly
+- **Filter by rating and media type** — Show only N stars and up, only unrated media, or only photos or videos. Filters combine with every sort order and with search, and rating a photo in the viewer never pulls it out from under you
 - **AI-powered semantic search** — Type natural language queries like "golden hour landscape" or "portrait with bokeh" and find matching photos using a local CLIP model (no internet required after first download)
 - **CLIP index** — Automatically built in the background after each library load; the model runs entirely on-device
 
@@ -172,3 +173,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+### Fonts
+
+The app bundles two typefaces, both under the [SIL Open Font License 1.1](https://openfontlicense.org):
+
+- [Outfit](https://github.com/Outfitio/Outfit-Fonts), Copyright 2021 The Outfit Project Authors
+- [Syne](https://gitlab.com/bonjour-monde/fonderie/syne-typeface), Copyright 2019 The Syne Project Authors
+
+The font files come from the `@fontsource-variable` packages. Their license texts ship with the app in `licenses/` (source: [`public/licenses/`](public/licenses/)).
