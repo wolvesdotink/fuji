@@ -8,6 +8,18 @@ import {
   type VideoPlayerHandle,
 } from "@/lib/videoPlayerBus";
 
+/**
+ * The grid card's thumbnail container for `imageId`, used as the hero of the
+ * grid→viewer morph. The grids are windowed, so the card is only in the DOM
+ * when its row is near the viewport; null otherwise, and the transition falls
+ * back to a plain cross-fade.
+ */
+function gridThumbnail(gridSelector: string, imageId: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(
+    `${gridSelector} .thumbnail-container[data-image-id="${CSS.escape(imageId)}"]`
+  );
+}
+
 export function useKeyboardNav() {
   const appStore = useAppStore();
   const galleryStore = useGalleryStore();
@@ -151,8 +163,7 @@ export function useKeyboardNav() {
         if (libImg) {
           // Find the card's container for imperative tagging (grid→single only)
           const sourceEl = libraryStore.viewMode === "grid"
-            ? document.querySelector<HTMLElement>(`.library-grid .thumbnail-container:nth-child(${libraryStore.currentIndex + 1})`)
-              ?? document.querySelectorAll<HTMLElement>(".library-grid .thumbnail-container")[libraryStore.currentIndex]
+            ? gridThumbnail(".library-grid", libImg.id)
             : null;
           startTransition(libImg.id, () => {
             libraryStore.viewMode =
@@ -256,7 +267,7 @@ export function useKeyboardNav() {
         const camImg = galleryStore.currentImage;
         if (camImg) {
           const sourceEl = galleryStore.viewMode === "grid"
-            ? document.querySelectorAll<HTMLElement>(".image-grid .thumbnail-container")[galleryStore.currentIndex]
+            ? gridThumbnail(".image-grid", camImg.id)
             : null;
           startTransition(camImg.id, () => {
             galleryStore.viewMode =
