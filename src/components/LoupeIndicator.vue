@@ -5,7 +5,8 @@
  * full-resolution image instead of showing a scaled-up placeholder.
  */
 defineProps<{
-  /** Zoom in percent (100 = one image pixel per screen pixel); null at fit. */
+  /** Zoom in percent (100 = one image pixel per screen pixel); null at fit,
+   *  or while a wheel/pinch zoom waits for the image to know its level. */
   percent: number | null;
   /** Zoom requested but the full-resolution image hasn't loaded yet. */
   loading: boolean;
@@ -15,14 +16,14 @@ defineProps<{
 <template>
   <Transition name="loupe-indicator">
     <div
-      v-if="percent !== null"
+      v-if="percent !== null || loading"
       class="loupe-indicator"
       role="status"
       aria-live="polite"
     >
-      <span class="loupe-percent">{{ percent }}%</span>
+      <span v-if="percent !== null" class="loupe-percent">{{ percent }}%</span>
       <template v-if="loading">
-        <span class="loupe-sep">&middot;</span>
+        <span v-if="percent !== null" class="loupe-sep">&middot;</span>
         <span class="loupe-note">loading full resolution</span>
       </template>
     </div>

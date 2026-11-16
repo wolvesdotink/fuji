@@ -30,14 +30,15 @@ import { registerLoupe, unregisterLoupe, type LoupeHandle } from "@/lib/loupeBus
  * devicePixelRatio, and navigation to a neighbour of a different size or
  * orientation (zoom level and relative position are kept, Lightroom-style).
  *
- * The `<img>` keeps its normal fitted layout (max-width/max-height: 100%,
- * centred); zoom is only a `translate3d() scale()` on top of it, so zooming
- * and panning never trigger layout. At fit there is no transform at all, so
- * the fitted view renders exactly as it did before the loupe existed.
+ * At fit the `<img>` keeps its normal fitted layout and gets no inline
+ * styles at all, so the fitted view renders exactly as before. Zoomed, it is
+ * laid out once at its natural size and moved with `translate3d() scale()`
+ * (see `zoomedStyle`), so panning and zooming never trigger layout.
  *
  * The 600 px thumbnail placeholder is never zoomed: until the full-res image
- * has loaded (`ready`), a zoom request is remembered and applied on load,
- * while the view shows the fitted placeholder and the indicator says the
+ * has loaded (`ready`), zoom input (click, Z, wheel, pinch) is remembered —
+ * the requested zoom and where it was aimed — and applied on load, while the
+ * view shows the fitted placeholder and the indicator says the
  * full-resolution image is still loading.
  */
 
@@ -56,6 +57,9 @@ interface Layout {
   /** Viewport (stage) size in CSS px. */
   vw: number;
   vh: number;
+  /** Stage origin in the viewport (CSS px), for device-pixel snapping. */
+  ox: number;
+  oy: number;
   /** Image size in image pixels, in display orientation. */
   natW: number;
   natH: number;
@@ -75,6 +79,19 @@ export interface LoupeOptions {
   enabled: Ref<boolean>;
 }
 
+/**
+ * Zoom input that arrived before the full-res image (and so its size) was
+ * known. `toggle`: click / Z, i.e. "100% here"; `factor`: wheel / pinch,
+ * relative to whatever zoom was in effect. `factor` accumulates further
+ * wheel/pinch input; (fx, fy) is the latest anchor as a fraction of the stage.
+ */
+interface PendingZoom {
+  kind: "toggle" | "factor";
+  factor: number;
+  fx: number;
+  fy: number;
+}
+
 interface GestureLikeEvent extends UIEvent {
   scale: number;
   clientX: number;
@@ -86,17 +103,21 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
   const zoom = ref<number | null>(null);
   const centerX = ref(0.5);
   const centerY = ref(0.5);
+  const pendingKind = ref<PendingZoom["kind"] | null>(null);
   const dragging = ref(false);
   const layoutVersion = ref(0);
+  // Full-resolution decode of the current image has finished (see the
+  // ready/image watcher).
+  const decoded = ref(false);
 
   // Pending state, written synchronously by input handlers and committed
   // once per frame (see createFrameCommit).
   let pZoom: number | null = null;
   let pCx = 0.5;
   let pCy = 0.5;
-  // A zoom requested before the full-res image loaded: where it was aimed,
-  // as a fraction of the stage, so it can be applied once the size is known.
-  let pendingAnchor: { fx: number; fy: number } | null = null;
+  // Zoom input received before the full-res image loaded, applied by
+  // measure() once the natural size is known.
+  let pending: PendingZoom | null = null;
 
   let layout: Layout | null = null;
 
@@ -104,6 +125,7 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     zoom.value = pZoom;
     centerX.value = pCx;
     centerY.value = pCy;
+    pendingKind.value = pending?.kind ?? null;
   });
 
   // --- geometry -----------------------------------------------------------
@@ -140,7 +162,7 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     pZoom = null;
     pCx = 0.5;
     pCy = 0.5;
-    pendingAnchor = null;
+    pending = null;
   }
 
   /** Zoom to `target`, keeping the image point under (ax, ay) in place. */
@@ -154,6 +176,18 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     const cur = spans(l, z, pCx, pCy);
     const ratio = next / z;
     setFromSpans(l, next, anchorStart(cur.sx, ax, ratio), anchorStart(cur.sy, ay, ratio));
+  }
+
+  /** Re-validate a kept zoom against the current image and viewport. */
+  function revalidate(l: Layout) {
+    if (pZoom === null) return;
+    const z = clamp(pZoom, fitZoom(l), maxZoom(l));
+    if (z <= fitZoom(l) * (1 + FIT_EPSILON)) {
+      setFit();
+    } else {
+      const s = spans(l, z, pCx, pCy);
+      setFromSpans(l, z, s.sx, s.sy);
+    }
   }
 
   function measure() {
@@ -177,6 +211,8 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     const l: Layout = {
       vw: rect.width,
       vh: rect.height,
+      ox: rect.left,
+      oy: rect.top,
       natW,
       natH,
       fit: Math.min(1, rect.width / natW, rect.height / natH),
@@ -185,19 +221,21 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     if (l.vw === 0 || l.vh === 0) return;
     layout = l;
 
-    if (pendingAnchor) {
-      const { fx, fy } = pendingAnchor;
-      setFit();
-      zoomAt(l, toggleZoom(l), fx * l.vw, fy * l.vh);
-    } else if (pZoom !== null) {
-      // Re-validate the kept zoom against this image and viewport.
-      const z = clamp(pZoom, fitZoom(l), maxZoom(l));
-      if (z <= fitZoom(l) * (1 + FIT_EPSILON)) {
+    const req = pending;
+    if (req) {
+      // Establish the base the input was relative to, then apply it.
+      pending = null;
+      let target: number;
+      if (req.kind === "toggle") {
         setFit();
+        target = toggleZoom(l) * req.factor;
       } else {
-        const s = spans(l, z, pCx, pCy);
-        setFromSpans(l, z, s.sx, s.sy);
+        revalidate(l);
+        target = (pZoom ?? fitZoom(l)) * req.factor;
       }
+      zoomAt(l, target, req.fx * l.vw, req.fy * l.vh);
+    } else {
+      revalidate(l);
     }
     frame.flush();
     layoutVersion.value++;
@@ -208,50 +246,84 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
   /** Zoomed and actually showing full-res pixels. */
   const isApplied = computed(() => {
     void layoutVersion.value;
-    return zoom.value !== null && ready.value && layout !== null;
+    return zoom.value !== null && ready.value && decoded.value && layout !== null;
   });
 
-  const transform = computed<string | undefined>(() => {
+  /**
+   * Zoomed styles for the full-res <img>. While zoomed the image is laid out
+   * at its natural size (one image pixel per device pixel) and positioned
+   * with translate3d + scale(zoom). Scaling the fitted box up instead looks
+   * equivalent, but WebKit then resamples the image even when the numbers
+   * work out to exactly 1:1, softening every pixel — so at 100% the scale
+   * here is exactly 1. Entering or leaving zoom is one layout change; pan
+   * and zoom after that only touch the transform.
+   */
+  const zoomedStyle = computed<CSSProperties | undefined>(() => {
     void layoutVersion.value;
     const z = zoom.value;
     const l = layout;
-    if (z === null || !l || !ready.value) return undefined;
+    if (z === null || !l || !ready.value || !decoded.value) return undefined;
     const s = spans(l, z, centerX.value, centerY.value);
-    // Snap to whole device pixels: at 100% a sub-pixel offset would resample
-    // every pixel and soften exactly the detail the loupe is for.
-    const snap = (v: number) => Math.round(v * l.dpr) / l.dpr;
-    // The <img> is laid out fitted and centred; transform from that box.
-    const boxX = (l.vw - l.natW * l.fit) / 2;
-    const boxY = (l.vh - l.natH * l.fit) / 2;
-    const scale = z / (l.dpr * l.fit);
-    return `translate3d(${snap(s.sx) - boxX}px, ${snap(s.sy) - boxY}px, 0) scale(${scale})`;
+    // Keep the image on whole device pixels; a sub-pixel offset would
+    // resample every pixel too. The stage itself can sit on a fractional
+    // device pixel (e.g. y = 79.5 at 1×), and WebKit snaps a composited
+    // layer's layout position separately from its transform, so: pull the
+    // box back onto the grid with left/top, then translate by whole device
+    // pixels from there.
+    const d = l.dpr;
+    const phaseX = Math.floor(l.ox * d) / d - l.ox;
+    const phaseY = Math.floor(l.oy * d) / d - l.oy;
+    const tx = (Math.round((l.ox + s.sx) * d) - Math.floor(l.ox * d)) / d;
+    const ty = (Math.round((l.oy + s.sy) * d) - Math.floor(l.oy * d)) / d;
+    return {
+      inset: "auto",
+      left: `${phaseX}px`,
+      top: `${phaseY}px`,
+      margin: "0",
+      maxWidth: "none",
+      maxHeight: "none",
+      width: `${l.natW / d}px`,
+      height: `${l.natH / d}px`,
+      transform: `translate3d(${tx}px, ${ty}px, 0) scale(${z})`,
+      transformOrigin: "0 0",
+      willChange: "transform",
+    };
   });
 
-  const imageStyle = computed<CSSProperties>(() => {
-    const t = transform.value;
-    if (!t) return { cursor: enabled.value ? "zoom-in" : undefined };
-    return { transform: t, transformOrigin: "0 0", willChange: "transform" };
-  });
+  const imageStyle = computed<CSSProperties>(
+    () => zoomedStyle.value ?? { cursor: enabled.value ? "zoom-in" : undefined }
+  );
+
+  /** Zoom requested (or in effect), possibly still waiting for full-res. */
+  const isZoomed = computed(() => zoom.value !== null || pendingKind.value !== null);
 
   /** For the thumbnail placeholder: it can be clicked to request a zoom. */
   const placeholderStyle = computed<CSSProperties>(() => ({
-    cursor: enabled.value && zoom.value === null ? "zoom-in" : undefined,
+    cursor: enabled.value && !isZoomed.value ? "zoom-in" : undefined,
   }));
 
   const stageStyle = computed<CSSProperties>(() =>
     isApplied.value ? { cursor: dragging.value ? "grabbing" : "grab" } : {}
   );
 
-  /** Zoom level for the indicator, e.g. 100; null at fit. */
-  const percent = computed(() =>
-    zoom.value === null ? null : Math.round(zoom.value * 100)
-  );
   /** Zoom requested, full-res image not loaded yet. */
-  const loading = computed(() => zoom.value !== null && !isApplied.value);
+  const loading = computed(() => isZoomed.value && !isApplied.value);
+
+  /** Zoom level for the indicator, e.g. 100; null at fit, and while a
+   *  wheel/pinch zoom waits for the image (its level depends on the image's
+   *  size, so there is no honest number to show yet). */
+  const percent = computed(() => {
+    if (pendingKind.value === "factor") return null;
+    if (pendingKind.value === "toggle") return TOGGLE_ZOOM * 100;
+    return zoom.value === null ? null : Math.round(zoom.value * 100);
+  });
 
   // --- commands -----------------------------------------------------------
 
+  const engaged = () => pZoom !== null || pending !== null;
+
   function reset() {
+    endDrag();
     setFit();
     frame.flush();
   }
@@ -259,7 +331,7 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
   /** Fit → toggle zoom at (fx, fy) (fractions of the stage); zoomed → fit. */
   function toggleAt(fx: number, fy: number) {
     if (!enabled.value) return;
-    if (pZoom !== null) {
+    if (engaged()) {
       reset();
       return;
     }
@@ -267,24 +339,41 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
       zoomAt(layout, toggleZoom(layout), fx * layout.vw, fy * layout.vh);
     } else {
       // Not loaded yet: remember the request. The exact target depends on
-      // the natural size, so measure() recomputes it on load.
-      pZoom = TOGGLE_ZOOM;
-      pendingAnchor = { fx, fy };
+      // the natural size, so measure() resolves it on load.
+      pending = { kind: "toggle", factor: 1, fx, fy };
     }
     frame.flush();
+  }
+
+  /** Wheel/pinch before load: accumulate the factor, keep the last anchor. */
+  function requestFactor(factor: number, fx: number, fy: number) {
+    const total = (pending?.factor ?? 1) * factor;
+    if (pending?.kind === "toggle") {
+      pending = { kind: "toggle", factor: total, fx, fy };
+    } else if (pZoom === null && total <= 1 + FIT_EPSILON) {
+      // Zoomed out at fit: nothing to apply.
+      pending = null;
+    } else {
+      pending = { kind: "factor", factor: total, fx, fy };
+    }
   }
 
   const handle: LoupeHandle = {
     toggle: () => toggleAt(0.5, 0.5),
     reset,
-    isZoomed: () => enabled.value && pZoom !== null,
+    isZoomed: () => enabled.value && engaged(),
   };
 
   // --- input --------------------------------------------------------------
 
   function stagePoint(e: { clientX: number; clientY: number }) {
     const rect = stage.value!.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top, rect };
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      fx: (e.clientX - rect.left) / rect.width,
+      fy: (e.clientY - rect.top) / rect.height,
+    };
   }
 
   /** Clicks on the PTP download card and its button are not photo clicks. */
@@ -297,12 +386,12 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
   // a gesture is live ignore ctrl+wheel so a pinch can't apply twice.
   let gestureActive = false;
   let gestureStartZoom = 1;
+  let gestureLastScale = 1;
 
   function onWheel(e: WheelEvent) {
     if (!enabled.value || !stage.value) return;
     e.preventDefault();
-    const l = layout;
-    if (!l || (e.ctrlKey && gestureActive)) return;
+    if (e.ctrlKey && gestureActive) return;
     // deltaMode 1 = lines (some mice): roughly 16 px per line.
     const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
     const factor = wheelZoomFactor(
@@ -310,7 +399,9 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
       e.ctrlKey ? PINCH_SENSITIVITY : undefined
     );
     const p = stagePoint(e);
-    zoomAt(l, (pZoom ?? fitZoom(l)) * factor, p.x, p.y);
+    const l = layout;
+    if (l) zoomAt(l, (pZoom ?? fitZoom(l)) * factor, p.x, p.y);
+    else requestFactor(factor, p.fx, p.fy);
     frame.schedule();
   }
 
@@ -318,17 +409,23 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     if (!enabled.value) return;
     e.preventDefault();
     gestureActive = true;
+    gestureLastScale = 1;
     gestureStartZoom = layout ? (pZoom ?? fitZoom(layout)) : 1;
   }
 
   function onGestureChange(e: Event) {
-    if (!enabled.value) return;
+    if (!enabled.value || !stage.value) return;
     e.preventDefault();
-    const l = layout;
-    if (!l || !stage.value) return;
     const g = e as GestureLikeEvent;
     const p = stagePoint(g);
-    zoomAt(l, gestureStartZoom * g.scale, p.x, p.y);
+    const l = layout;
+    if (l) {
+      zoomAt(l, gestureStartZoom * g.scale, p.x, p.y);
+    } else {
+      // `scale` is cumulative for the gesture; feed only the change.
+      requestFactor(g.scale / gestureLastScale, p.fx, p.fy);
+    }
+    gestureLastScale = g.scale;
     frame.schedule();
   }
 
@@ -337,28 +434,63 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     gestureActive = false;
   }
 
+  // --- press / drag -------------------------------------------------------
+  //
+  // Pointer events with pointer capture once a pan starts, so the drag
+  // follows the pointer outside the window. A drag ends on pointerup, on
+  // pointercancel / lostpointercapture, when the window loses focus (app
+  // switch mid-drag), or on any move that arrives without the primary
+  // button held — never left "stuck" waiting for a mouseup that won't come.
+  //
+  // Capture is taken only once the press turns into a pan, so a plain click
+  // keeps its real target (the click handler needs to know whether it
+  // landed on the photo or the letterbox).
+
   let suppressClick = false;
-  let detachDrag: (() => void) | null = null;
+  let endDrag: () => void = () => {};
 
   function onMouseDown(e: MouseEvent) {
-    if (!enabled.value || e.button !== 0 || isOverlay(e.target)) return;
-    // Stop WebKit's native image drag and text selection.
-    e.preventDefault();
+    // Stop WebKit's native image drag and text selection; the press itself
+    // is handled through pointer events.
+    if (enabled.value && e.button === 0 && !isOverlay(e.target)) e.preventDefault();
+  }
+
+  function onPointerDown(e: PointerEvent) {
+    if (!enabled.value || e.button !== 0 || !e.isPrimary || isOverlay(e.target)) return;
+    const el = stage.value;
+    if (!el) return;
+    endDrag();
     suppressClick = false;
 
     const l = layout;
     const panning = l !== null && pZoom !== null;
     const start = panning ? spans(l, pZoom!, pCx, pCy) : null;
+    const pointerId = e.pointerId;
     const downX = e.clientX;
     const downY = e.clientY;
     let moved = false;
+    let captured = false;
 
-    function onMove(ev: MouseEvent) {
+    function onMove(ev: PointerEvent) {
+      if (ev.pointerId !== pointerId) return;
+      if ((ev.buttons & 1) === 0) {
+        // Button released somewhere we never heard about.
+        finish();
+        return;
+      }
       const dx = ev.clientX - downX;
       const dy = ev.clientY - downY;
       if (!moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) {
         moved = true;
-        if (panning) dragging.value = true;
+        if (panning) {
+          dragging.value = true;
+          try {
+            el!.setPointerCapture(pointerId);
+            captured = true;
+          } catch {
+            // Pointer already gone; the window listeners still cover it.
+          }
+        }
       }
       if (panning && start && layout && pZoom !== null) {
         setFromSpans(layout, pZoom, start.sx + dx, start.sy + dy);
@@ -366,22 +498,43 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
       }
     }
 
-    function onUp() {
-      detach();
+    function onUp(ev: PointerEvent) {
+      if (ev.pointerId !== pointerId) return;
+      finish();
+    }
+
+    function onCancel(ev: Event) {
+      if (ev instanceof PointerEvent && ev.pointerId !== pointerId) return;
+      finish();
+    }
+
+    function onBlur() {
+      finish();
+    }
+
+    function finish() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("blur", onBlur);
+      el!.removeEventListener("lostpointercapture", onCancel);
+      if (captured && el!.hasPointerCapture?.(pointerId)) {
+        el!.releasePointerCapture(pointerId);
+      }
       dragging.value = false;
+      // A press that turned into a drag must not end in a click (toggle),
+      // even when the drag was cut short and the button comes up later over
+      // the stage. The next press clears this, so nothing stays armed.
       suppressClick = moved;
+      endDrag = () => {};
     }
 
-    function detach() {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      detachDrag = null;
-    }
-
-    detachDrag?.();
-    detachDrag = detach;
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    endDrag = () => finish();
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("blur", onBlur);
+    el.addEventListener("lostpointercapture", onCancel);
   }
 
   function onClick(e: MouseEvent) {
@@ -398,13 +551,9 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     }
     // At fit only a click on the photo zooms (not the letterbox around it);
     // zoomed, a click anywhere returns to fit.
-    if (pZoom === null && !(e.target instanceof HTMLImageElement)) return;
+    if (!engaged() && !(e.target instanceof HTMLImageElement)) return;
     const p = stagePoint(e);
-    toggleAt(p.x / p.rect.width, p.y / p.rect.height);
-  }
-
-  function onDblClick() {
-    if (enabled.value) reset();
+    toggleAt(p.fx, p.fy);
   }
 
   // --- wiring -------------------------------------------------------------
@@ -416,9 +565,12 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     ["gesturestart", onGestureStart],
     ["gesturechange", onGestureChange],
     ["gestureend", onGestureEnd],
+    ["pointerdown", onPointerDown as EventListener],
     ["mousedown", onMouseDown as EventListener],
+    // No dblclick listener: onClick handles the second click via `detail`,
+    // and a dblclick also fires when the second press was a drag, which
+    // must not unzoom.
     ["click", onClick as EventListener],
-    ["dblclick", onDblClick],
   ];
 
   const resizeObserver =
@@ -437,6 +589,12 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
     { flush: "post" }
   );
 
+  // The stage can move without resizing (it is re-laid out with the window),
+  // which shifts its device-pixel phase; re-measure on window resize too.
+  function onWindowResize() {
+    if (layout) measure();
+  }
+
   // devicePixelRatio changes (window dragged to another display) don't
   // resize the stage, so watch the resolution media query as well.
   let dprQuery: MediaQueryList | null = null;
@@ -452,7 +610,31 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
 
   // (Re)measure once the full-res image is in the DOM and loaded. Leaving it
   // (navigation) drops the layout, so the kept zoom waits for the next load.
-  watch([ready, image], () => measure(), { flush: "post" });
+  //
+  // Then decode it at full resolution, off the main thread. WebKit decodes a
+  // large image only at the size it is displayed, so the fitted view holds a
+  // subsampled bitmap; laying the image out at natural size for the first
+  // zoom would otherwise force a synchronous full decode on the next paint
+  // (~300 ms for 26 MP in testing). Zoom is applied once this finishes;
+  // until then it is shown as loading, like a zoom requested before load.
+  let decodeToken = 0;
+  watch(
+    [ready, image],
+    () => {
+      const token = ++decodeToken;
+      decoded.value = false;
+      measure();
+      const img = image.value;
+      if (!ready.value || !img) return;
+      img
+        .decode()
+        .catch(() => {})
+        .finally(() => {
+          if (token === decodeToken) decoded.value = true;
+        });
+    },
+    { flush: "post" }
+  );
 
   // Videos can't be zoomed; don't carry an invisible zoom across one.
   watch(enabled, (on) => {
@@ -461,22 +643,23 @@ export function useLoupe({ stage, image, ready, enabled }: LoupeOptions) {
 
   onMounted(() => {
     watchDpr();
+    window.addEventListener("resize", onWindowResize);
     registerLoupe(handle);
   });
 
   onScopeDispose(() => {
     frame.cancel();
-    detachDrag?.();
+    endDrag();
     resizeObserver?.disconnect();
     dprQuery?.removeEventListener("change", onDprChange);
+    window.removeEventListener("resize", onWindowResize);
     const el = stage.value;
     if (el) for (const [type, fn, opts] of listeners) el.removeEventListener(type, fn, opts);
     unregisterLoupe(handle);
   });
 
   return {
-    /** Zoom requested (possibly still waiting for full-res). */
-    isZoomed: computed(() => zoom.value !== null),
+    isZoomed,
     isApplied,
     loading,
     percent,
