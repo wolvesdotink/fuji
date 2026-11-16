@@ -1,8 +1,23 @@
 <script setup lang="ts">
+import { computed, ref } from "vue";
 import { useGalleryStore } from "@/stores/gallery";
 import ImageCard from "./ImageCard.vue";
+import VirtualGrid, { type VirtualGridHandle } from "./VirtualGrid.vue";
+import type { ImagePair } from "@/types";
 
 const store = useGalleryStore();
+const imageKey = (image: ImagePair) => image.id;
+// Unique per file across catalog reloads (ids are stems and can repeat).
+const anchorKey = (image: ImagePair) => image.hif_path;
+
+const grid = ref<VirtualGridHandle | null>(null);
+// Forwarded for the keyboard cursor; see VirtualGridHandle (wait a tick after
+// scrollToIndex() before querying the newly mounted cards).
+defineExpose({
+  scrollToIndex: (index: number, block?: "nearest" | "center") =>
+    grid.value?.scrollToIndex(index, block),
+  columns: computed(() => grid.value?.columns ?? 1),
+});
 </script>
 
 <template>
@@ -14,14 +29,17 @@ const store = useGalleryStore();
       ></div>
     </div>
 
-    <div class="image-grid">
-      <ImageCard
-        v-for="(image, index) in store.images"
-        :key="image.id"
-        :image="image"
-        :index="index"
-      />
-    </div>
+    <VirtualGrid
+      ref="grid"
+      class="image-grid"
+      :items="store.images"
+      :item-key="imageKey"
+      :anchor-key="anchorKey"
+    >
+      <template #default="{ item, index }">
+        <ImageCard :image="item" :index="index" />
+      </template>
+    </VirtualGrid>
   </div>
 </template>
 
@@ -45,11 +63,5 @@ const store = useGalleryStore();
   background: linear-gradient(90deg, var(--color-accent), var(--color-heif-raw));
   transition: width 0.3s ease;
   border-radius: 1px;
-}
-
-.image-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 14px;
 }
 </style>

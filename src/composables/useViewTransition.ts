@@ -20,6 +20,11 @@ export function useViewTransition() {
    * Single→Grid: `activeTransitionId` is set so the card that mounts fresh
    * in the new state picks up `view-transition-name` via its reactive
    * `:style` binding.
+   *
+   * The grids are windowed, so either card may not be mounted (the source
+   * card is off-screen, or the user navigated far from the restored scroll
+   * position in the viewer). Then only one side has a hero and the browser
+   * falls back to a plain cross-fade for it.
    */
   async function startTransition(
     imageId: string,
@@ -46,7 +51,7 @@ export function useViewTransition() {
     if (!document.startViewTransition) {
       callback();
       await nextTick();
-      restoreGridScroll();
+      await restoreGridScroll();
       cleanup(sourceEl);
       return;
     }
@@ -54,6 +59,11 @@ export function useViewTransition() {
     const transition = document.startViewTransition(async () => {
       callback();
       await nextTick();
+
+      // Restore first: the windowed grid only mounts the rows around the
+      // restored position, and the hero card must be among them before we
+      // look for it below.
+      await restoreGridScroll();
 
       // Wait for the newly-mounted hero image to be paint-ready before the
       // new-state snapshot is captured. Matches either grid→viewer
@@ -69,8 +79,6 @@ export function useViewTransition() {
           new Promise<void>((r) => setTimeout(r, 80)),
         ]);
       }
-
-      restoreGridScroll();
     });
 
     try {
@@ -89,11 +97,16 @@ export function useViewTransition() {
     activeTransitionId.value = null;
   }
 
-  function restoreGridScroll() {
+  async function restoreGridScroll() {
     if (savedGridScrollTop === null) return;
     const gridContainer = document.querySelector(GRID_CONTAINER_SELECTOR);
     if (gridContainer) {
       gridContainer.scrollTop = savedGridScrollTop;
+      // The browser fires the scroll event on its next frame, after the
+      // view-transition snapshot. Dispatch it now so VirtualGrid mounts the
+      // rows for the restored position, then let Vue patch the DOM.
+      gridContainer.dispatchEvent(new Event("scroll"));
+      await nextTick();
     }
   }
 

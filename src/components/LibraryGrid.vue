@@ -1,10 +1,24 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from "vue";
+import { computed, ref, watch, onUnmounted } from "vue";
 import { useLibraryStore } from "@/stores/library";
 import LibraryCard from "./LibraryCard.vue";
+import VirtualGrid, { type VirtualGridHandle } from "./VirtualGrid.vue";
 import { describeFilters } from "@/lib/libraryFilter";
+import type { LibraryImage } from "@/types";
 
 const store = useLibraryStore();
+const imageKey = (image: LibraryImage) => image.id;
+// Unique per file across library reloads (ids are stems and can repeat).
+const anchorKey = (image: LibraryImage) => image.file_path;
+
+const grid = ref<VirtualGridHandle | null>(null);
+// Forwarded for the keyboard cursor; see VirtualGridHandle (wait a tick after
+// scrollToIndex() before querying the newly mounted cards).
+defineExpose({
+  scrollToIndex: (index: number, block?: "nearest" | "center") =>
+    grid.value?.scrollToIndex(index, block),
+  columns: computed(() => grid.value?.columns ?? 1),
+});
 
 // Delayed show prevents the indicator from flashing on fast loads
 const showLoading = ref(false);
@@ -93,14 +107,18 @@ onUnmounted(() => {
     </div>
 
     <!-- Grid -->
-    <div class="library-grid" v-if="store.displayImages.length > 0">
-      <LibraryCard
-        v-for="(image, index) in store.displayImages"
-        :key="image.id"
-        :image="image"
-        :index="index"
-      />
-    </div>
+    <VirtualGrid
+      v-if="store.displayImages.length > 0"
+      ref="grid"
+      class="library-grid"
+      :items="store.displayImages"
+      :item-key="imageKey"
+      :anchor-key="anchorKey"
+    >
+      <template #default="{ item, index }">
+        <LibraryCard :image="item" :index="index" />
+      </template>
+    </VirtualGrid>
   </div>
 </template>
 
@@ -124,12 +142,6 @@ onUnmounted(() => {
   background: linear-gradient(90deg, var(--color-accent), var(--color-heif-raw));
   transition: width 0.3s ease;
   border-radius: 1px;
-}
-
-.library-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 14px;
 }
 
 .empty-library {
