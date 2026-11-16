@@ -18,7 +18,7 @@
  * / `.library-grid-container`), which also holds the loading bar and the
  * empty/loading states above the grid.
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const props = withDefaults(
   defineProps<{
@@ -91,20 +91,76 @@ function measure() {
   }
 }
 
-/** Recompute which rows are mounted from the current scroll position. */
-function update() {
-  if (!scrollEl || rowHeight.value <= 0) return;
-  const top = scrollEl.scrollTop - gridOffset();
-  const bottom = top + scrollEl.clientHeight;
+/** Mount the rows around a scroll position of the scroll container. */
+function setWindow(scrollTop: number) {
+  const top = scrollTop - gridOffset();
+  const bottom = top + (scrollEl?.clientHeight ?? 0);
   const first = Math.floor(top / rowPitch.value) - props.overscan;
   const last = Math.ceil(bottom / rowPitch.value) + props.overscan;
   startRow.value = Math.min(Math.max(first, 0), Math.max(totalRows.value - 1, 0));
   endRow.value = Math.max(Math.min(last, totalRows.value), startRow.value + 1);
 }
 
+/**
+ * Where the user is, in item terms: the first item of the first visible row,
+ * how far (as a fraction of the row pitch) that row is scrolled past the top,
+ * and whether the view sits at the very bottom. Recorded on every update,
+ * while the geometry and the DOM agree, so a resize can restore it. Null at
+ * the top of the grid, where keeping the pixel position is already right.
+ */
+let anchor: { index: number; fraction: number; atBottom: boolean } | null = null;
+
+function recordAnchor() {
+  if (!scrollEl) return;
+  const top = scrollEl.scrollTop - gridOffset();
+  if (scrollEl.scrollTop <= 0 || top <= 0) {
+    anchor = null;
+    return;
+  }
+  const row = Math.floor(top / rowPitch.value);
+  anchor = {
+    index: row * columns.value,
+    fraction: (top - row * rowPitch.value) / rowPitch.value,
+    atBottom: scrollEl.scrollTop >= scrollEl.scrollHeight - scrollEl.clientHeight - 1,
+  };
+}
+
+/** Recompute which rows are mounted from the current scroll position. */
+function update() {
+  if (!scrollEl || rowHeight.value <= 0) return;
+  setWindow(scrollEl.scrollTop);
+  recordAnchor();
+}
+
+/**
+ * Re-read the geometry. If the column count or row pitch changed (window
+ * resize, font load) while scrolled into the grid, put the anchored item back
+ * where it was: a fixed pixel scrollTop would land on different photos.
+ * Unchanged geometry, including the first measurement on mount, leaves the
+ * scroll position alone, so the viewer's scroll restore is never overridden.
+ */
 function remeasure() {
+  const before = rowHeight.value > 0 ? { columns: columns.value, pitch: rowPitch.value } : null;
+  const saved = anchor;
   measure();
-  update();
+  const changed =
+    before !== null &&
+    (before.columns !== columns.value || Math.abs(before.pitch - rowPitch.value) > 0.01);
+  if (!changed || !saved || !scrollEl) {
+    update();
+    return;
+  }
+  const target = saved.atBottom
+    ? Number.MAX_SAFE_INTEGER
+    : gridOffset() + Math.floor(saved.index / columns.value) * rowPitch.value + saved.fraction * rowPitch.value;
+  // Mount the target rows first: until Vue patches the padding, the content
+  // is still sized for the old geometry and the browser would clamp scrollTop.
+  setWindow(target);
+  nextTick(() => {
+    if (!scrollEl) return;
+    scrollEl.scrollTop = saved.atBottom ? scrollEl.scrollHeight : target;
+    update();
+  });
 }
 
 /**
@@ -148,6 +204,15 @@ onMounted(() => {
   scrollEl = gridEl.value?.parentElement ?? null;
   scrollEl?.addEventListener("scroll", onScroll, { passive: true });
   remeasure();
+  // That first pass measured a single card in an otherwise empty grid, so the
+  // scroll container may not have had its scrollbar yet, and the column width
+  // (hence card height) can be off by the scrollbar's width. Give the grid its
+  // full height now and measure again, so the geometry is final before
+  // useViewTransition restores a scroll position against it.
+  if (gridEl.value && rowHeight.value > 0) {
+    Object.assign(gridEl.value.style, padding.value);
+    remeasure();
+  }
 
   // Card height only depends on the column width and the footer's text
   // metrics. The scroll container's content box covers the first (window
@@ -204,5 +269,9 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 14px;
+  /* remeasure() keeps the user's place across geometry changes itself. The
+     browser's scroll anchoring would adjust scrollTop a second time when the
+     padding changes. */
+  overflow-anchor: none;
 }
 </style>
