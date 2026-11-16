@@ -4,7 +4,7 @@
  * UI fonts, bundled with the app (no network). Variable woff2 files from
  * @fontsource-variable, Latin and Latin Extended subsets only. The browser
  * fetches a subset only when text on the page needs one of its characters.
- * The Latin files are preloaded from index.html.
+ * The built index.html preloads the Latin files (see vite.config.ts).
  *
  * `font-display: block`: the files are local, so they load in milliseconds;
  * blocking for that long avoids painting the fallback font first.
