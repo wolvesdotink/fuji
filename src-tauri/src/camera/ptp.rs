@@ -39,6 +39,9 @@ pub struct PtpFileEntry {
     pub uti: String,
     pub folder: String,
     pub thumbnail: Option<String>,
+    /// The file's date on the camera, in seconds since the Unix epoch.
+    #[serde(default)]
+    pub date: Option<f64>,
 }
 
 /// Result of a PTP catalog command.

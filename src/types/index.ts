@@ -16,6 +16,10 @@ export interface ImagePair {
   raf_size: number | null;
   media_type: MediaType;
   thumbnail_path: string | null;
+  // File dates on the camera (seconds since the Unix epoch), PTP only. The
+  // importer stamps them onto the copies so they keep their capture dates.
+  hif_date?: number | null;
+  raf_date?: number | null;
 }
 
 export type StarRating = 0 | 1 | 2 | 3 | 4 | 5;
@@ -32,6 +36,8 @@ export interface ImportSelection {
   // can't cheaply stat files mid-transfer) and validate preview-cache hits.
   hif_size?: number;
   raf_size?: number | null;
+  hif_date?: number | null;
+  raf_date?: number | null;
 }
 
 export interface ImportProgress {

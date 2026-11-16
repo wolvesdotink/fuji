@@ -32,6 +32,14 @@ pub struct ImagePair {
     pub media_type: MediaType,
     #[serde(default)]
     pub thumbnail_path: Option<String>,
+    /// File dates on the camera (seconds since the Unix epoch). Only PTP
+    /// catalogs fill these: a PTP download lands with the download time, so the
+    /// importer stamps these back on. Mass storage copies the source file's
+    /// own timestamps instead.
+    #[serde(default)]
+    pub hif_date: Option<f64>,
+    #[serde(default)]
+    pub raf_date: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +63,11 @@ pub struct ImportSelection {
     pub hif_size: Option<u64>,
     #[serde(default)]
     pub raf_size: Option<u64>,
+    /// Camera file dates, carried through from `ImagePair` (PTP only).
+    #[serde(default)]
+    pub hif_date: Option<f64>,
+    #[serde(default)]
+    pub raf_date: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

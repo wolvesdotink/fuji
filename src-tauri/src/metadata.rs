@@ -13,14 +13,20 @@ use crate::index;
 const READ_LIMIT: usize = 256 * 1024;
 
 /// Bump when the ratings-cache entry shape changes so stale caches are ignored.
-const RATINGS_CACHE_VERSION: u32 = 1;
+const RATINGS_CACHE_VERSION: u32 = 2;
 
 /// Fingerprint of a source image plus its optional `.xmp` sidecar. A missing
 /// file or sidecar contributes zeros, so the key still changes when either one
 /// appears, disappears, or is edited (mtime/size).
+///
+/// `ctime` (inode change time, nanoseconds) catches rewrites that keep mtime
+/// and size: the importer restores camera dates after writing a rating in
+/// place, so re-importing a shot with a new rating would otherwise look
+/// unchanged. Nothing can set ctime back, so any write moves it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RatingKey {
     mtime: u64,
+    ctime: u64,
     size: u64,
     sidecar_mtime: u64,
     sidecar_size: u64,
@@ -41,8 +47,10 @@ struct RatingsCache {
     entries: HashMap<String, RatingCacheEntry>,
 }
 
-/// `(mtime_secs, size)` for a path, or `(0, 0)` when it is absent/unreadable.
-fn file_meta(path: &Path) -> (u64, u64) {
+/// `(mtime_secs, ctime_nanos, size)` for a path, or zeros when it is
+/// absent/unreadable.
+fn file_meta(path: &Path) -> (u64, u64, u64) {
+    use std::os::unix::fs::MetadataExt;
     match fs::metadata(path) {
         Ok(m) => {
             let mtime = m
@@ -51,18 +59,22 @@ fn file_meta(path: &Path) -> (u64, u64) {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            (mtime, m.len())
+            let ctime = (m.ctime().max(0) as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(m.ctime_nsec().max(0) as u64);
+            (mtime, ctime, m.len())
         }
-        Err(_) => (0, 0),
+        Err(_) => (0, 0, 0),
     }
 }
 
 /// Build the cache key from the image + its `.xmp` sidecar fingerprints.
 fn rating_key(path: &Path) -> RatingKey {
-    let (mtime, size) = file_meta(path);
-    let (sidecar_mtime, sidecar_size) = file_meta(&path.with_extension("xmp"));
+    let (mtime, ctime, size) = file_meta(path);
+    let (sidecar_mtime, _, sidecar_size) = file_meta(&path.with_extension("xmp"));
     RatingKey {
         mtime,
+        ctime,
         size,
         sidecar_mtime,
         sidecar_size,
@@ -121,7 +133,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Checks both embedded XMP in the image file AND .xmp sidecar files.
 ///
 /// Results are cached in `<cache_dir>/ratings-cache.json`, keyed by each file's
-/// path + mtime + size (and its sidecar's). Unchanged files — including unrated
+/// path + mtime + ctime + size (and its sidecar's). Unchanged files — including unrated
 /// ones, recorded as `None` — skip the 256 KB read + XMP parse entirely, so the
 /// common case of re-opening a library never re-scans.
 pub fn read_ratings(file_paths: &[String], cache_dir: &Path) -> Result<HashMap<String, u8>, String> {
@@ -425,17 +437,6 @@ fn write_sidecar(image_path: &str, rating: u8) -> Result<(), String> {
             e
         )
     })
-}
-
-/// Write XMP ratings to multiple files in batch.
-pub fn write_ratings_batch(file_ratings: &[(String, u8)]) -> Result<(), String> {
-    for (file_path, rating) in file_ratings {
-        if let Err(e) = write_rating(file_path, *rating) {
-            log::warn!("Failed to write rating for {}: {}", file_path, e);
-            // Continue with other files, don't fail the entire batch
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

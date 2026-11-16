@@ -68,10 +68,16 @@ export const useLibraryStore = defineStore("library", () => {
 
     const sort = sortBy.value;
     const sorted = [...images.value];
+    // Newest first. Burst shots share a timestamp to the second, so ties fall
+    // back to the camera's file numbering to keep the order they were shot in.
+    const byName = (a: LibraryImage, b: LibraryImage) =>
+      a.file_name < b.file_name ? 1 : a.file_name > b.file_name ? -1 : 0;
+    const byCreated = (a: LibraryImage, b: LibraryImage) =>
+      b.date_created - a.date_created || byName(a, b);
 
     switch (sort) {
       case "updated":
-        sorted.sort((a, b) => b.date_modified - a.date_modified);
+        sorted.sort((a, b) => b.date_modified - a.date_modified || byName(a, b));
         break;
       case "stars": {
         // In single view read the frozen snapshot so rating the current photo
@@ -82,13 +88,13 @@ export const useLibraryStore = defineStore("library", () => {
           const rA = r.get(a.file_path) ?? 0;
           const rB = r.get(b.file_path) ?? 0;
           if (rA !== rB) return rB - rA;
-          return b.date_created - a.date_created;
+          return byCreated(a, b);
         });
         break;
       }
       case "created":
       default:
-        sorted.sort((a, b) => b.date_created - a.date_created);
+        sorted.sort(byCreated);
         break;
     }
 

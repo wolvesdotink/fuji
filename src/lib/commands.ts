@@ -90,8 +90,11 @@ export async function ptpImportFiles(
   cameraName: string,
   selections: ImportSelection[],
   destDir: string,
-  /** Preview cache to source already-downloaded files from; null to skip. */
-  previewCacheDir: string | null,
+  /**
+   * Previews downloaded from this camera in this session, camera file name →
+   * local path. The importer copies these instead of re-downloading them.
+   */
+  previewFiles: Record<string, string>,
   onProgress: (progress: ImportProgress) => void
 ): Promise<void> {
   const channel = new Channel<ImportProgress>();
@@ -100,7 +103,7 @@ export async function ptpImportFiles(
     cameraName,
     selections,
     destDir,
-    previewCacheDir,
+    previewFiles,
     onProgress: channel,
   });
 }
