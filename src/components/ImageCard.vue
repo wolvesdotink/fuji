@@ -28,6 +28,17 @@ function onMouseEnter() {
 
 const rating = computed(() => store.ratings.get(props.image.id) ?? 0);
 const marked = computed(() => store.markedForCompare.has(props.image.id));
+// The keyboard cursor. A computed, so moving the cursor re-renders only the
+// two cards whose value flips, not every mounted card.
+const isCurrent = computed(() => store.currentIndex === props.index);
+
+const accessibleName = computed(() => {
+  const parts = [props.image.id];
+  if (props.image.media_type === "Video") parts.push("video");
+  if (rating.value > 0) parts.push(rating.value === 1 ? "1 star" : `${rating.value} stars`);
+  if (marked.value) parts.push("marked for compare");
+  return parts.join(", ");
+});
 
 const thumbnailSrc = computed(() => {
   // Try thumbnail from cache first (for RAF-based thumbs)
@@ -101,7 +112,17 @@ function openInViewer(e: MouseEvent) {
 </script>
 
 <template>
-  <div :class="['image-card', borderClass]" @click="openInViewer" @mouseenter="onMouseEnter" @mouseleave="cancelPreload">
+  <div
+    :class="['image-card', borderClass, { 'is-current': isCurrent }]"
+    role="listitem"
+    :aria-label="accessibleName"
+    :aria-current="isCurrent ? 'true' : undefined"
+    :aria-posinset="index + 1"
+    :aria-setsize="store.images.length"
+    @click="openInViewer"
+    @mouseenter="onMouseEnter"
+    @mouseleave="cancelPreload"
+  >
     <div class="thumbnail-container" :data-index="index" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
       <!-- Shimmer skeleton while the thumbnail generates -->
       <div v-if="!hasThumbnail" class="thumbnail-skeleton">
@@ -162,13 +183,35 @@ function openInViewer(e: MouseEvent) {
   overflow: hidden;
   cursor: pointer;
   border: 2px solid transparent;
-  transition: all var(--transition-medium);
+  /* box-shadow is quick: it carries the keyboard cursor, which must keep up
+     with a held arrow key. */
+  transition: all var(--transition-medium), box-shadow var(--transition-fast);
 }
 
 .image-card:hover {
   border-color: var(--color-border-hover);
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Keyboard cursor: a gold ring outside the card, separated from it by a
+   sliver of the page background so the rating border (green, blue) or the
+   hover border stays readable inside it. Drawn as box-shadow: it takes no
+   layout space and isn't clipped by the card's own overflow. */
+.image-card.is-current {
+  box-shadow: var(--cursor-ring);
+}
+
+.image-card.is-current:hover {
+  box-shadow: var(--cursor-ring), 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.image-card.is-current .card-footer {
+  background: var(--color-accent-dim);
+}
+
+.image-card.is-current .card-name {
+  color: var(--color-accent-hover);
 }
 
 .border-heif {

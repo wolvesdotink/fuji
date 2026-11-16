@@ -17,6 +17,16 @@ const { startPreload, cancelPreload } = useHoverPreload();
 const { activeTransitionId, startTransition } = useViewTransition();
 
 const rating = computed(() => store.getRating(props.image.file_path));
+// The keyboard cursor. A computed, so moving the cursor re-renders only the
+// two cards whose value flips, not every mounted card.
+const isCurrent = computed(() => store.currentIndex === props.index);
+
+const accessibleName = computed(() => {
+  const parts = [props.image.file_name];
+  if (props.image.media_type === "Video") parts.push("video");
+  if (rating.value > 0) parts.push(rating.value === 1 ? "1 star" : `${rating.value} stars`);
+  return parts.join(", ");
+});
 
 const hasThumbnail = computed(() => store.thumbnailPaths.has(props.image.id));
 
@@ -63,7 +73,17 @@ function onMouseEnter() {
 </script>
 
 <template>
-  <div class="library-card" @click="openInViewer" @mouseenter="onMouseEnter" @mouseleave="cancelPreload">
+  <div
+    :class="['library-card', { 'is-current': isCurrent }]"
+    role="listitem"
+    :aria-label="accessibleName"
+    :aria-current="isCurrent ? 'true' : undefined"
+    :aria-posinset="index + 1"
+    :aria-setsize="store.displayImages.length"
+    @click="openInViewer"
+    @mouseenter="onMouseEnter"
+    @mouseleave="cancelPreload"
+  >
     <div class="thumbnail-container" :data-index="index" :style="{ viewTransitionName: activeTransitionId === image.id ? 'hero-image' : 'none' }">
       <!-- Shimmer skeleton while thumbnail generates -->
       <div v-if="!hasThumbnail" class="thumbnail-skeleton">
@@ -114,13 +134,32 @@ function onMouseEnter() {
   overflow: hidden;
   cursor: pointer;
   border: 2px solid transparent;
-  transition: all var(--transition-medium);
+  /* box-shadow is quick: it carries the keyboard cursor, which must keep up
+     with a held arrow key. */
+  transition: all var(--transition-medium), box-shadow var(--transition-fast);
 }
 
 .library-card:hover {
   border-color: var(--color-border-hover);
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Keyboard cursor: same ring as the camera grid's (see ImageCard). */
+.library-card.is-current {
+  box-shadow: var(--cursor-ring);
+}
+
+.library-card.is-current:hover {
+  box-shadow: var(--cursor-ring), 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.library-card.is-current .card-footer {
+  background: var(--color-accent-dim);
+}
+
+.library-card.is-current .card-name {
+  color: var(--color-accent-hover);
 }
 
 /* Thumbnail */
