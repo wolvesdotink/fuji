@@ -153,8 +153,10 @@ watch(
   }
 );
 
-function onFullResLoad() {
-  fullResLoaded.value = true;
+// Only the current full-res <img> may mark the photo loaded: a detached
+// element from the photo we just left can still finish loading afterwards.
+function onFullResLoad(e: Event) {
+  if (e.target === fullImgEl.value) fullResLoaded.value = true;
 }
 
 // Loupe (fit ↔ 100%, wheel/pinch zoom, drag-pan) for stills. Zoom persists
@@ -164,6 +166,7 @@ const stageEl = ref<HTMLElement | null>(null);
 const fullImgEl = ref<HTMLImageElement | null>(null);
 const loupe = useLoupe({
   stage: stageEl,
+  photoId: computed(() => image.value?.id),
   image: fullImgEl,
   ready: fullResLoaded,
   enabled: computed(() => image.value?.media_type === "Image"),
