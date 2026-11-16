@@ -1,4 +1,5 @@
 import { shallowRef } from "vue";
+import type { GridPlace } from "@/components/VirtualGrid.vue";
 
 /**
  * The keyboard cursor of the grid on screen. The cursor itself is the store's
@@ -25,6 +26,10 @@ export interface GridCursor {
   reveal(mode?: "follow" | "return"): Promise<void>;
   /** The cursor card's thumbnail container, if mounted: the morph's hero. */
   currentCard(): HTMLElement | null;
+  /** The grid's place in item terms, taken when leaving for the viewer. */
+  capturePlace(): GridPlace | null;
+  /** Put it back after the grid remounts; false if it doesn't apply here. */
+  restorePlace(place: GridPlace): boolean;
 }
 
 export const activeGridCursor = shallowRef<GridCursor | null>(null);

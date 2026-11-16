@@ -298,19 +298,55 @@ function pageRows(): number {
   return Math.max(Math.floor((scrollEl.clientHeight + rowGap.value) / rowPitch.value), 1);
 }
 
+/**
+ * The user's place in item terms (the anchor), for putting the grid back
+ * after it was unmounted (the viewer replaces it). Null at the top.
+ */
+function capturePlace(): GridPlace {
+  return { anchor: anchor ? { ...anchor } : null } as unknown as GridPlace;
+}
+
+/**
+ * Put a place from capturePlace() back: the same item at the same offset
+ * from the viewport top, under the current geometry, and make it the anchor,
+ * so a later re-measure re-applies it rather than shifting it. The rows are
+ * mounted synchronously; the cards are in the DOM after the next render.
+ * Returns false (and leaves the position alone) when the anchored item is
+ * not in this list, such as a place taken in the other grid.
+ */
+function restorePlace(place: GridPlace): boolean {
+  if (!scrollEl || rowHeight.value <= 0) return false;
+  const saved = (place as unknown as { anchor: Anchor | null }).anchor;
+  if (!saved) {
+    anchor = null;
+    scrollToPosition(0);
+    return true;
+  }
+  const hit = resolveIndex(saved.item);
+  if (hit === undefined) return false;
+  anchor = { ...saved, item: props.items[hit], index: hit };
+  const target = anchorTarget(anchor);
+  setWindow(target);
+  const max = scrollEl.scrollHeight - scrollEl.clientHeight;
+  scrollEl.scrollTop = Math.round(Math.max(anchor.atBottom ? max : Math.min(target, max), 0));
+  programmaticTop = scrollEl.scrollTop;
+  update();
+  return true;
+}
+
 defineExpose({
   scrollToIndex,
   pageRows,
+  capturePlace,
+  restorePlace,
   /** Current column count; reactive, readonly. */
   columns: readonly(columns),
 });
 
 // Scroll events are handled synchronously (no rAF throttle): WebKit already
 // fires them once per frame, and updating in the same frame keeps freshly
-// exposed rows from being painted blank. useViewTransition restores a scroll
-// position by dispatching a synthetic scroll event, so the matching rows are
-// mounted before the view-transition snapshot; an untrusted event is taken as
-// such a deliberate position and always sets the anchor.
+// exposed rows from being painted blank. An untrusted (synthetic) scroll
+// event is taken as a deliberate position and always sets the anchor.
 function onScroll(e: Event) {
   if (!scrollEl || rowHeight.value <= 0) return;
   const echo =
@@ -448,10 +484,19 @@ onBeforeUnmount(() => {
  * through a template ref. After scrollToIndex() the target cards are mounted
  * on Vue's next render: `await nextTick()` before querying them.
  */
+/** A grid position from capturePlace(); opaque to callers. */
+export interface GridPlace {
+  readonly __gridPlace: true;
+}
+
 export interface VirtualGridHandle {
   scrollToIndex(index: number, block?: "nearest" | "center", margin?: number): void;
   /** Rows that fit in the viewport (at least 1). */
   pageRows(): number;
+  /** The user's place, for restorePlace() after a remount. */
+  capturePlace(): GridPlace;
+  /** Put a captured place back; false if its item is not in this list. */
+  restorePlace(place: GridPlace): boolean;
   /** Current column count. Reactive when read through the component ref. */
   readonly columns: number;
 }

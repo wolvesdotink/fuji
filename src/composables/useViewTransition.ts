@@ -1,14 +1,15 @@
 import { ref, nextTick } from "vue";
 import { activeGridCursor } from "@/lib/gridCursor";
+import type { GridPlace } from "@/components/VirtualGrid.vue";
 
 // Module-level shared state — only one transition at a time
 const activeTransitionId = ref<string | null>(null);
 
-// Persisted grid scroll position so we can restore it when returning from the viewer
-let savedGridScrollTop: number | null = null;
-
-const GRID_CONTAINER_SELECTOR =
-  ".image-grid-container, .library-grid-container";
+// The grid's place when the viewer replaced it, in the grid's own terms
+// (anchored item and offset), put back when returning to the grid. A raw
+// scrollTop would land elsewhere if the geometry changed meanwhile (a window
+// resize in the viewer), and a later re-measure would move it.
+let savedGridPlace: GridPlace | null = null;
 
 export function useViewTransition() {
   /**
@@ -32,11 +33,9 @@ export function useViewTransition() {
     callback: () => void,
     sourceEl?: HTMLElement | null
   ): Promise<void> {
-    // Save grid scroll position before any transition (if grid is visible)
-    const gridContainer = document.querySelector(GRID_CONTAINER_SELECTOR);
-    if (gridContainer) {
-      savedGridScrollTop = gridContainer.scrollTop;
-    }
+    // Leaving a grid: remember its place.
+    const grid = activeGridCursor.value;
+    if (grid) savedGridPlace = grid.capturePlace();
 
     // Set reactive id — needed when cards mount in the new state (single→grid)
     activeTransitionId.value = imageId;
@@ -123,20 +122,16 @@ export function useViewTransition() {
   }
 
   async function restoreGridScroll() {
-    const gridContainer = document.querySelector(GRID_CONTAINER_SELECTOR);
-    if (gridContainer && savedGridScrollTop !== null) {
-      gridContainer.scrollTop = savedGridScrollTop;
-      // The browser fires the scroll event on its next frame, after the
-      // view-transition snapshot. Dispatch it now so VirtualGrid mounts the
-      // rows for the restored position, then let Vue patch the DOM.
-      gridContainer.dispatchEvent(new Event("scroll"));
-      await nextTick();
-    }
+    const grid = activeGridCursor.value;
+    if (!grid) return; // not returning to a grid
+    // Put the grid's place back and let Vue mount its rows before the
+    // view-transition snapshot. A place from the other grid doesn't apply.
+    if (savedGridPlace && grid.restorePlace(savedGridPlace)) await nextTick();
     // The viewer may have moved far from the photo the grid was left on.
     // The restored position stands while the current photo is fully visible
     // in it; otherwise the grid brings it into view, so the cursor is on
     // screen and the hero card is mounted before the snapshot.
-    await activeGridCursor.value?.reveal("return");
+    await grid.reveal("return");
   }
 
   return { activeTransitionId, startTransition };

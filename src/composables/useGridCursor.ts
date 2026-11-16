@@ -78,6 +78,8 @@ export function useGridCursor(options: {
       scroller.value?.querySelector<HTMLElement>(
         `.thumbnail-container[data-index="${index.value}"]`
       ) ?? null,
+    capturePlace: () => grid.value?.capturePlace() ?? null,
+    restorePlace: (place) => grid.value?.restorePlace(place) ?? false,
   };
 
   // Whether the cursor's card was on screen as last rendered: the state the
