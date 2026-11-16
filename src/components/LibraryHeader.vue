@@ -78,6 +78,22 @@ watch(localQuery, (val) => {
   }, 300);
 });
 
+// The store can drop the search on its own: Esc in the grid, or a folder
+// load (which also replaces the catalog, possibly while typed text is still
+// waiting on the debounce above). Mirror that in the box, so it never shows a
+// query that is no longer applied, and cancel the pending search so it cannot
+// bring the old query back. Typing never triggers this: the store's query
+// only goes from non-empty to empty when a search is cleared.
+watch(
+  [() => libraryStore.searchQuery, () => libraryStore.images],
+  ([query, images], [prevQuery, prevImages]) => {
+    if ((query || !prevQuery) && images === prevImages) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = null;
+    localQuery.value = "";
+  }
+);
+
 async function pickDestination() {
   const dir = await open({
     directory: true,
