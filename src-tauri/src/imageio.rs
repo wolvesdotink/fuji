@@ -275,8 +275,10 @@ fn max_pixel_size_for_width(oriented_w: i64, oriented_h: i64, max_width: u32) ->
     if oriented_h <= oriented_w {
         max_width
     } else {
-        // Round up so integer truncation inside ImageIO cannot land at 599.
-        (oriented_h * max_width + oriented_w - 1) / oriented_w
+        // Round down: ImageIO rounds the short edge to nearest, so rounding the
+        // long edge up could produce 601px for off-ratio sources (4000x6001).
+        // Rounding down can give 599, never more than the cap.
+        oriented_h * max_width / oriented_w
     }
 }
 
@@ -355,7 +357,7 @@ pub(crate) fn oriented_size(source: Source<'_>) -> Option<(u32, u32)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use image::{ImageEncoder, Rgb, RgbImage};
 
@@ -363,6 +365,7 @@ mod tests {
     fn size_limit_targets_width() {
         assert_eq!(max_pixel_size_for_width(6000, 4000, 600), 600);
         assert_eq!(max_pixel_size_for_width(4000, 6000, 600), 900);
+        assert_eq!(max_pixel_size_for_width(4000, 6001, 600), 900);
         assert_eq!(max_pixel_size_for_width(5152, 7728, 600), 900);
         // Square and small sources.
         assert_eq!(max_pixel_size_for_width(1000, 1000, 600), 600);
@@ -373,7 +376,7 @@ mod tests {
 
     /// A 1200x800 JPEG whose left half is red and right half blue, tagged with
     /// the given EXIF orientation.
-    fn tagged_jpeg(orientation: u16) -> Vec<u8> {
+    pub(crate) fn tagged_jpeg(orientation: u16) -> Vec<u8> {
         let img = RgbImage::from_fn(1200, 800, |x, _| {
             if x < 600 {
                 Rgb([255, 0, 0])
@@ -429,6 +432,33 @@ mod tests {
             decoded.get_pixel(300, decoded.height() - 20)[2] > 200,
             "bottom is blue"
         );
+    }
+
+    #[test]
+    fn off_ratio_portraits_never_exceed_the_width_cap() {
+        for (w, h) in [
+            (4000u32, 6001u32),
+            (2000, 3001),
+            (1000, 1999),
+            (999, 1700),
+            (1200, 1201),
+        ] {
+            let img = image::GrayImage::from_fn(w, h, |x, y| image::Luma([((x ^ y) & 0xff) as u8]));
+            let mut src = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut src, 80)
+                .write_image(img.as_raw(), w, h, image::ExtendedColorType::L8)
+                .unwrap();
+            let jpeg = jpeg_thumbnail(Source::Bytes(&src), 600, 0.8).unwrap();
+            let out = image::load_from_memory(&jpeg).unwrap();
+            assert!(
+                (599..=600).contains(&out.width()),
+                "{}x{} -> {}x{}",
+                w,
+                h,
+                out.width(),
+                out.height()
+            );
+        }
     }
 
     #[test]
