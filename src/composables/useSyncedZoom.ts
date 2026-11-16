@@ -1,4 +1,11 @@
 import { ref, computed, onScopeDispose, type Ref, type ComputedRef } from "vue";
+import {
+  anchorStart,
+  clamp,
+  clampStart,
+  createFrameCommit,
+  wheelZoomFactor,
+} from "@/lib/zoomPan";
 
 /**
  * Shared zoom + pan state for N side-by-side panes.
@@ -40,6 +47,13 @@ import { ref, computed, onScopeDispose, type Ref, type ComputedRef } from "vue";
  *
  *   That's why pan is disabled at s=1: with nothing zoomed in, there's
  *   nothing to pan.
+ *
+ * Shared math:
+ *   The anchoring and clamping live in `@/lib/zoomPan` (also used by the
+ *   single-image loupe). That module works with the displayed span's start
+ *   `p` instead of the origin; in pane units the two are related by
+ *   `p = originX * (1 - s)`, so clamping the origin to [0, 1] is the same
+ *   as keeping the zoomed pane's edges outside the viewport.
  */
 
 export interface SyncedZoom {
@@ -56,8 +70,14 @@ export interface SyncedZoom {
 const MIN_SCALE = 1;
 const MAX_SCALE = 16;
 
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
+/** Displayed span start (pane units) for a transform-origin at scale `s`. */
+function originToStart(origin: number, s: number): number {
+  return origin * (1 - s);
+}
+
+/** Inverse of originToStart. Undefined at s = 1, where any origin works. */
+function startToOrigin(start: number, s: number): number {
+  return s === 1 ? 0.5 : start / (1 - s);
 }
 
 export function useSyncedZoom(): SyncedZoom {
@@ -75,24 +95,12 @@ export function useSyncedZoom(): SyncedZoom {
   let pendingScale = scale.value;
   let pendingOriginX = originX.value;
   let pendingOriginY = originY.value;
-  let rafId: number | null = null;
 
-  function scheduleCommit() {
-    if (rafId !== null) return;
-    rafId = requestAnimationFrame(() => {
-      rafId = null;
-      scale.value = pendingScale;
-      originX.value = pendingOriginX;
-      originY.value = pendingOriginY;
-    });
-  }
-
-  function cancelPendingCommit() {
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
-    }
-  }
+  const frame = createFrameCommit(() => {
+    scale.value = pendingScale;
+    originX.value = pendingOriginX;
+    originY.value = pendingOriginY;
+  });
 
   const transform = computed(() => `scale(${scale.value})`);
   const transformOrigin = computed(
@@ -111,15 +119,11 @@ export function useSyncedZoom(): SyncedZoom {
     // Read PENDING state — the latest value this frame, not the committed
     // ref which may lag a frame behind.
     const s = pendingScale;
-    // Image point currently under the cursor. At s=1 the transform is
-    // identity, so the image point equals the cursor position directly.
-    const ix = s === 1 ? u : (u - pendingOriginX * (1 - s)) / s;
-    const iy = s === 1 ? v : (v - pendingOriginY * (1 - s)) / s;
-
-    // Exponential zoom feels more natural than linear. ~120 per wheel
-    // "click" on typical mice → factor ≈ e^(-0.24) ≈ 0.79 per tick out.
-    const zoomFactor = Math.exp(-e.deltaY * 0.002);
-    const newScale = clamp(s * zoomFactor, MIN_SCALE, MAX_SCALE);
+    const newScale = clamp(
+      s * wheelZoomFactor(e.deltaY),
+      MIN_SCALE,
+      MAX_SCALE
+    );
 
     if (newScale <= MIN_SCALE) {
       // Fully zoomed out — reset to center to avoid a stale off-center
@@ -127,25 +131,31 @@ export function useSyncedZoom(): SyncedZoom {
       pendingScale = MIN_SCALE;
       pendingOriginX = 0.5;
       pendingOriginY = 0.5;
-      scheduleCommit();
+      frame.schedule();
       return;
     }
 
     if (newScale === s) return;
 
-    // Keep (ix, iy) at cursor (u, v):
-    //   u = ix*newScale + newOrigin*(1-newScale)
-    //   newOrigin = (u - ix*newScale) / (1 - newScale)
-    const rawOriginX = (u - ix * newScale) / (1 - newScale);
-    const rawOriginY = (v - iy * newScale) / (1 - newScale);
+    // Keep the image point under the cursor at the cursor, then keep the
+    // zoomed pane covering the viewport. At the image edges the anchor
+    // therefore can't hold perfectly, but there are never empty margins.
+    const ratio = newScale / s;
+    const startX = clampStart(
+      anchorStart(originToStart(pendingOriginX, s), u, ratio),
+      newScale,
+      1
+    );
+    const startY = clampStart(
+      anchorStart(originToStart(pendingOriginY, s), v, ratio),
+      newScale,
+      1
+    );
 
     pendingScale = newScale;
-    // Clamping origin to [0,1] means at image edges the cursor-anchor
-    // won't hold perfectly, but it guarantees the transform-origin stays
-    // within the image (no surprise empty margins).
-    pendingOriginX = clamp(rawOriginX, 0, 1);
-    pendingOriginY = clamp(rawOriginY, 0, 1);
-    scheduleCommit();
+    pendingOriginX = clamp(startToOrigin(startX, newScale), 0, 1);
+    pendingOriginY = clamp(startToOrigin(startY, newScale), 0, 1);
+    frame.schedule();
   }
 
   function onMouseDown(e: MouseEvent, pane: HTMLElement) {
@@ -159,20 +169,21 @@ export function useSyncedZoom(): SyncedZoom {
     const rect = pane.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
 
-    const startOriginX = pendingOriginX;
-    const startOriginY = pendingOriginY;
+    const s = pendingScale;
+    const startX = originToStart(pendingOriginX, s);
+    const startY = originToStart(pendingOriginY, s);
     const startClientX = e.clientX;
     const startClientY = e.clientY;
-    const s = pendingScale;
 
     function onMove(ev: MouseEvent) {
       const du = (ev.clientX - startClientX) / rect.width;
       const dv = (ev.clientY - startClientY) / rect.height;
-      // Pan math: originX' = originX - du/(s-1). Derivation in the file
-      // header comment. Writes pending; committed to the ref once per frame.
-      pendingOriginX = clamp(startOriginX - du / (s - 1), 0, 1);
-      pendingOriginY = clamp(startOriginY - dv / (s - 1), 0, 1);
-      scheduleCommit();
+      // The span follows the cursor; in origin terms this is
+      // originX' = originX - du/(s-1) (derivation in the header comment).
+      // Writes pending; committed to the ref once per frame.
+      pendingOriginX = clamp(startToOrigin(clampStart(startX + du, s, 1), s), 0, 1);
+      pendingOriginY = clamp(startToOrigin(clampStart(startY + dv, s, 1), s), 0, 1);
+      frame.schedule();
     }
 
     function onUp() {
@@ -191,13 +202,10 @@ export function useSyncedZoom(): SyncedZoom {
     // Drop any queued frame so a stale wheel/pan commit can't clobber the
     // reset, then commit synchronously — reset is user-initiated and rare,
     // and the "Reset zoom" button's disabled state should flip immediately.
-    cancelPendingCommit();
-    scale.value = 1;
-    originX.value = 0.5;
-    originY.value = 0.5;
+    frame.flush();
   }
 
-  onScopeDispose(cancelPendingCommit);
+  onScopeDispose(frame.cancel);
 
   return {
     scale,
