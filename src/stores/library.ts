@@ -398,11 +398,16 @@ export const useLibraryStore = defineStore("library", () => {
     isIndexing.value = false;
     indexProgress.value = { completed: 0, total: 0 };
     isIndexReady.value = false;
-    // Bumping the generation above already invalidated a search in flight,
-    // so it will never settle its own flag; settle it here. This must not
-    // wait for the listing: if the listing fails, nothing later would.
+    // Starting a load ends the current search. Bumping the generation above
+    // already invalidated a search in flight, so it will never settle its
+    // own flag or apply its results; drop the whole search here rather than
+    // leave its query next to an older query's results. This must not wait
+    // for the listing: if the listing fails, nothing later would do it, and
+    // the previous catalog stays on screen unfiltered with an empty query.
     searchSeq++;
     isSearching.value = false;
+    searchResults.value = null;
+    searchQuery.value = "";
     isLoading.value = true;
     try {
       const home = await homeDir();

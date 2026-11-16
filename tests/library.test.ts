@@ -385,6 +385,33 @@ test("a search in flight is settled even when the next folder fails to load", as
   assert.equal(store.searchResults, null, "the dropped search applies nothing");
 });
 
+test("a failed load does not leave a query next to another query's results", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const first = store.searchImages("sun");
+  await tick();
+  be.answerSearch("sun", ["A"]);
+  await first;
+  assert.deepEqual(resultIds(store), ["A"]);
+
+  const pending = store.searchImages("moon");
+  await tick();
+  await quietly(() => store.loadLibrary("FAIL"));
+  await tick();
+  assert.equal(store.searchQuery, "", "the load ended the search");
+  assert.equal(store.searchResults, null);
+  assert.equal(store.isSearching, false);
+  assert.deepEqual(store.displayImages.map((i) => i.id), ["A"], "the old catalog is shown unfiltered");
+
+  be.answerSearch("moon", []);
+  await pending;
+  assert.equal(store.searchQuery, "");
+  assert.equal(store.searchResults, null, "the dropped search applies nothing");
+  assert.equal(store.isSearching, false);
+});
+
 test("clearing the search drops a search still in flight", async () => {
   const be = backend();
   const store = useLibraryStore();
