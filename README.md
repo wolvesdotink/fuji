@@ -59,11 +59,17 @@ The app is signed and notarized, so macOS will open it without warnings on first
 
 ## Keyboard Shortcuts
 
+In both grids a gold ring marks the current photo (the keyboard cursor). The keys below act on it, and the grid scrolls to keep it in view.
+
 ### Camera Mode
 
 | Key | Action |
 |-----|--------|
 | `←` / `→` | Previous / Next image |
+| `↑` / `↓` | Grid: move up / down one row |
+| `Home` / `End` | Grid: first / last image |
+| `Page Up` / `Page Down` | Grid: move by one screen of rows |
+| `Enter` | Grid: open the current image |
 | `1`–`5` | Rate and advance to next unreviewed |
 | `0` | Clear rating and advance |
 | `Space` | Jump to next unreviewed image |
@@ -78,7 +84,11 @@ The app is signed and notarized, so macOS will open it without warnings on first
 | Key | Action |
 |-----|--------|
 | `←` / `→` | Previous / Next image |
-| `1`–`5` | Set star rating |
+| `↑` / `↓` | Grid: move up / down one row |
+| `Home` / `End` | Grid: first / last image |
+| `Page Up` / `Page Down` | Grid: move by one screen of rows |
+| `Enter` | Grid: open the current image |
+| `1`–`5` | Set star rating (grid and single view) |
 | `0` | Clear rating |
 | `G` | Toggle grid / single view |
 | `Z` | Zoom: toggle fit / 100% (photos) |
@@ -92,6 +102,8 @@ point you clicked; click again, double-click, `Z` or `Esc` to go back to fit.
 Scroll or pinch to zoom anywhere between fit and 400%, and drag to pan. The
 zoom level and position are kept while you step through photos with `←` / `→`,
 so you can compare focus across a burst, and reset when you leave the viewer.
+
+Keys with `Cmd`, `Ctrl` or `Alt` held are left to macOS. Keys don't reach the grid while you type in the search field or while the camera prompt or the import screen is open.
 
 ---
 
