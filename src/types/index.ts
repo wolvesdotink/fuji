@@ -61,11 +61,32 @@ export interface PtpFileProgress {
   bytes_total: number;
 }
 
-export interface ThumbnailProgress {
+export interface ThumbnailEntry {
   image_id: string;
   thumbnail_path: string;
+}
+
+/**
+ * Coalesced thumbnail progress: cache hits arrive in large chunks and new
+ * thumbnails every few dozen files, so a warm load is a handful of messages.
+ * `completed` counts every input id, including those in `failed`. Batches are
+ * for progressive display only; see `ThumbnailResult`.
+ */
+export interface ThumbnailBatch {
+  items: ThumbnailEntry[];
+  failed: string[];
   completed: number;
   total: number;
+}
+
+/**
+ * Return value of the thumbnail commands: the complete outcome. Channel
+ * batches can arrive after the command resolves, so code that needs every
+ * path (e.g. the CLIP indexer) must use this, via `fillThumbnails`.
+ */
+export interface ThumbnailResult {
+  items: ThumbnailEntry[];
+  failed: string[];
 }
 
 // --- App Config ---

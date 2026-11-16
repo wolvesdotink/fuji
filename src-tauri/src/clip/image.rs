@@ -31,11 +31,27 @@ fn pack_chw(rgb: &RgbImage) -> Vec<f32> {
     data
 }
 
+/// Decode an image with its EXIF orientation applied. Library thumbnails
+/// written by the old `sips` pipeline keep landscape pixels plus an
+/// orientation tag; without this, portrait shots were embedded sideways.
+fn open_upright(path: &Path) -> image::ImageResult<image::DynamicImage> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .into_decoder()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    Ok(img)
+}
+
 /// Preprocess a JPEG thumbnail for CLIP: center-crop to square, resize to
 /// 224x224, convert to RGB float32, normalize with CLIP mean/std. Returns a flat
 /// CHW `[1, 3, 224, 224]` buffer ready to hand to an ort `Tensor`.
 pub fn preprocess_image(image_path: &str) -> Result<Vec<f32>, String> {
-    let img = image::open(Path::new(image_path))
+    let img = open_upright(Path::new(image_path))
         .map_err(|e| format!("Failed to open image {}: {}", image_path, e))?;
 
     // Center crop to square
@@ -147,5 +163,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn thumbnails_with_an_orientation_tag_are_read_upright() {
+        // 1200x800 stored, tagged "rotate 90° CW": displayed 800x1200 with the
+        // stored left (red) half on top.
+        let jpeg = crate::imageio::tests::tagged_jpeg(6);
+        let path = std::env::temp_dir().join(format!(
+            "fuji_clip_orient_{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, jpeg).unwrap();
+        let img = open_upright(&path).unwrap().to_rgb8();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(img.dimensions(), (800, 1200));
+        assert!(img.get_pixel(400, 20)[0] > 200, "top is red");
+        assert!(img.get_pixel(400, 1180)[2] > 200, "bottom is blue");
     }
 }

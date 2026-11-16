@@ -1,9 +1,6 @@
 use byteorder::{BigEndian, ReadBytesExt};
-use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
-use image::{DynamicImage, ImageDecoder, ImageReader};
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Extract the embedded JPEG preview from a Fuji RAF file.
@@ -50,48 +47,4 @@ pub fn extract_jpeg_from_raf(raf_path: &Path) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Failed to read JPEG data: {}", e))?;
 
     Ok(jpeg_data)
-}
-
-/// Extract and resize the embedded JPEG to a thumbnail.
-/// Returns lossy JPEG bytes (quality 80) of the resized thumbnail.
-///
-/// Applies EXIF orientation before resize/encode: Fuji cameras capture sensor
-/// data in landscape and mark portrait shots with an orientation tag. The
-/// re-encoded JPEG carries no EXIF tag, so we bake the rotation into the pixels
-/// here — otherwise every portrait shot renders sideways in the gallery.
-pub fn extract_thumbnail(raf_path: &Path, max_width: u32) -> Result<Vec<u8>, String> {
-    let jpeg_data = extract_jpeg_from_raf(raf_path)?;
-
-    // Build a decoder so we can read the EXIF orientation tag before decoding.
-    let reader = ImageReader::new(Cursor::new(&jpeg_data))
-        .with_guessed_format()
-        .map_err(|e| format!("Failed to guess image format: {}", e))?;
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|e| format!("Failed to build decoder: {}", e))?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut img = DynamicImage::from_decoder(decoder)
-        .map_err(|e| format!("Failed to decode embedded JPEG: {}", e))?;
-    img.apply_orientation(orientation);
-
-    // Only resize if wider than max_width (post-rotation dimensions).
-    let resized = if img.width() > max_width {
-        let ratio = max_width as f64 / img.width() as f64;
-        let new_height = (img.height() as f64 * ratio) as u32;
-        img.resize(max_width, new_height, FilterType::Triangle)
-    } else {
-        img
-    };
-
-    // Encode to lossy JPEG (quality 80). Pixels are already orientation-baked
-    // above, so the smaller JPEG both encodes faster than WebP and renders
-    // upright without any EXIF tag.
-    let mut out = Vec::new();
-    JpegEncoder::new_with_quality(&mut out, 80)
-        .encode_image(&resized)
-        .map_err(|e| format!("Failed to encode thumbnail: {}", e))?;
-
-    Ok(out)
 }

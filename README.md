@@ -143,9 +143,15 @@ pnpm tauri build
 
 # Bump version (patch / minor / major)
 pnpm bump:patch
+
+# Frontend tests (store and IPC logic, with Tauri's IPC mocked)
+pnpm test
+
+# Backend tests
+cd src-tauri && cargo test
 ```
 
-Requires [Rust](https://rustup.rs) and the [Tauri CLI prerequisites](https://tauri.app/start/prerequisites/).
+Requires [Rust](https://rustup.rs) and the [Tauri CLI prerequisites](https://tauri.app/start/prerequisites/). `pnpm test` runs Node's built-in test runner directly on the TypeScript sources (`--experimental-strip-types`), so it needs Node 22.6 or newer.
 
 ### DMG installer background
 

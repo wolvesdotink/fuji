@@ -98,12 +98,35 @@ pub enum ImportPhase {
     Complete,
 }
 
+/// One finished thumbnail inside a [`ThumbnailBatch`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThumbnailProgress {
+pub struct ThumbnailEntry {
     pub image_id: String,
     pub thumbnail_path: String,
+}
+
+/// Coalesced thumbnail progress. Cache hits arrive in large chunks and newly
+/// generated thumbnails are flushed every few dozen files or ~100 ms, so a warm
+/// load costs a handful of IPC messages instead of one per file. `completed`
+/// counts every input id, including the ones listed in `failed`.
+///
+/// Channel messages are for progressive display only: Tauri can deliver large
+/// ones after the command has resolved. The command's [`ThumbnailResult`] is
+/// the complete outcome.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThumbnailBatch {
+    pub items: Vec<ThumbnailEntry>,
+    pub failed: Vec<String>,
     pub completed: u32,
     pub total: u32,
+}
+
+/// Final outcome of a thumbnail command: every id with a thumbnail, and every
+/// id whose thumbnail could not be generated.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThumbnailResult {
+    pub items: Vec<ThumbnailEntry>,
+    pub failed: Vec<String>,
 }
 
 #[allow(dead_code)]

@@ -5,3 +5,5 @@ pub mod import;
 pub mod library;
 pub mod ratings;
 pub mod thumbnails;
+#[cfg(test)]
+mod thumbnail_bench;

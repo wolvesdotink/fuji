@@ -12,6 +12,7 @@ import {
   readFileRatings,
   writeFileRating,
 } from "@/lib/commands";
+import { fillThumbnails } from "@/lib/thumbnails";
 
 export const useLibraryStore = defineStore("library", () => {
   // Images. Image records are immutable — the array is only ever replaced
@@ -362,8 +363,10 @@ export const useLibraryStore = defineStore("library", () => {
   }
 
   // Actions
-  // Bumped per loadLibrary call so a slow ratings read for a folder the user
-  // already left cannot apply its ratings to the new folder's images.
+  // Bumped per loadLibrary call. Everything a load starts in the background
+  // (listing, ratings read, thumbnails, CLIP index) checks it and stops
+  // touching shared state once a newer load has replaced the catalog (mirrors
+  // gallery.ts's catalogGeneration).
   let loadGeneration = 0;
 
   // Paths the user rated since the current folder's ratings read started.
@@ -379,11 +382,22 @@ export const useLibraryStore = defineStore("library", () => {
     // the frozen ratings snapshot, which holds the previous folder's paths
     // and would otherwise filter and sort the new folder against them.
     viewMode.value = "grid";
+    // The new load owns the thumbnail/index state from here on, whether or
+    // not it reaches those steps (empty folder, failed listing). Stale runs
+    // never touch these flags again, so nothing is left stuck.
+    isLoadingThumbnails.value = false;
+    thumbnailProgress.value = { completed: 0, total: 0 };
+    isDownloadingModel.value = false;
+    modelDownloadProgress.value = { bytes_downloaded: 0, bytes_total: 0, file_name: "" };
+    isIndexing.value = false;
+    indexProgress.value = { completed: 0, total: 0 };
+    isIndexReady.value = false;
     isLoading.value = true;
     try {
       const home = await homeDir();
       const indexCacheDir = await join(home, ".cache", "fuji-culler");
       const listed = await listLibraryImages(destPath, indexCacheDir);
+      // A newer load started meanwhile: its catalog wins.
       if (generation !== loadGeneration) return;
       viewMode.value = "grid";
       images.value = listed;
@@ -435,51 +449,64 @@ export const useLibraryStore = defineStore("library", () => {
 
         // Generate thumbnails in the background, then build the CLIP index.
         // buildSearchIndex reads thumbnailPaths, so it MUST run only after
-        // thumbnails complete — hence the chained .then().
-        loadThumbnails()
-          .then(() => buildSearchIndex())
-          .catch((e) => console.error("Background indexing failed:", e));
+        // thumbnails complete — hence the chained .then(). Both steps are
+        // tied to this load's generation, and a thumbnail failure skips
+        // indexing.
+        loadThumbnails(generation)
+          .then(() => buildSearchIndex(generation))
+          .catch((e) => console.error("Library thumbnails or indexing failed:", e));
       }
     } catch (e) {
       console.error("Failed to load library:", e);
     } finally {
-      isLoading.value = false;
+      // A stale load must not hide a newer load's listing indicator.
+      if (generation === loadGeneration) isLoading.value = false;
     }
   }
 
-  async function loadThumbnails() {
-    if (images.value.length === 0) return;
+  /**
+   * Generate thumbnails for the catalog current at call time. Rejects if the
+   * command fails. Once a newer load starts (`generation` is stale), the run
+   * still fills its own, discarded map but no longer touches the shared
+   * loading/progress state.
+   */
+  async function loadThumbnails(generation = loadGeneration) {
+    // Captured before any await: this run belongs to this catalog.
+    const catalog = images.value;
+    const paths = thumbnailPaths.value;
+    const isCurrent = () => generation === loadGeneration;
+    if (catalog.length === 0 || !isCurrent()) return;
 
     isLoadingThumbnails.value = true;
-    thumbnailProgress.value = { completed: 0, total: images.value.length };
-
-    const home = await homeDir();
-    const cacheDir = await join(home, ".cache", "fuji-culler", "library-thumbs");
+    thumbnailProgress.value = { completed: 0, total: catalog.length };
 
     try {
-      await generateLibraryThumbnails(
-        images.value.map((img) => img.file_path),
-        images.value.map((img) => img.id),
-        cacheDir,
-        (progress) => {
-          // In-place .set only — Vue wraps the Map reactively and tracks
-          // has/get per key, so only the card observing this image_id
-          // recomputes. Reassigning `new Map(...)` here invalidated every
-          // card's thumbnail lookup on each thumbnail, an O(n) storm per
-          // file → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
-          if (progress.thumbnail_path) {
-            thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
-          }
-          thumbnailProgress.value = {
-            completed: progress.completed,
-            total: progress.total,
-          };
+      const home = await homeDir();
+      const cacheDir = await join(home, ".cache", "fuji-culler", "library-thumbs");
+      // In-place .set only — Vue wraps the Map reactively and tracks has/get
+      // per key, so only the cards observing these image_ids recompute.
+      // Reassigning `new Map(...)` per batch invalidated every card's lookup,
+      // an O(n) storm per message → O(n^2) over a load. fillThumbnails
+      // applies the command's full result before resolving, which
+      // buildSearchIndex (chained after this) depends on: channel batches
+      // can still be in flight when the command resolves.
+      await fillThumbnails(
+        (onBatch) =>
+          generateLibraryThumbnails(
+            catalog.map((img) => img.file_path),
+            catalog.map((img) => img.id),
+            cacheDir,
+            onBatch
+          ),
+        {
+          paths,
+          onProgress: (completed, total) => {
+            if (isCurrent()) thumbnailProgress.value = { completed, total };
+          },
         }
       );
-    } catch (e) {
-      console.error("Failed to generate library thumbnails:", e);
     } finally {
-      isLoadingThumbnails.value = false;
+      if (isCurrent()) isLoadingThumbnails.value = false;
     }
   }
 
@@ -495,52 +522,61 @@ export const useLibraryStore = defineStore("library", () => {
     }
   }
 
-  async function buildSearchIndex() {
-    if (images.value.length === 0) return;
+  /**
+   * Build the CLIP index for the catalog current at call time from its
+   * thumbnails. Stops after any await at which a newer load has replaced the
+   * catalog, so a stale run never indexes (or marks ready) another catalog.
+   */
+  async function buildSearchIndex(generation = loadGeneration) {
+    const catalog = images.value;
+    const paths = thumbnailPaths.value;
+    const isCurrent = () => generation === loadGeneration;
+    if (catalog.length === 0 || !isCurrent()) return;
 
     const home = await homeDir();
     const modelDir = await join(home, ".cache", "fuji-culler", "models");
     const indexPath = await join(home, ".cache", "fuji-culler", "clip-index.bin");
+    if (!isCurrent()) return;
 
-    // Ensure models are downloaded
+    // Ensure models are downloaded.
     isDownloadingModel.value = true;
+    modelDownloadProgress.value = { bytes_downloaded: 0, bytes_total: 0, file_name: "" };
     try {
       await ensureClipModels(modelDir, (progress) => {
-        modelDownloadProgress.value = progress;
+        if (isCurrent()) modelDownloadProgress.value = progress;
       });
     } catch (e) {
       console.error("Failed to download CLIP models:", e);
-      isDownloadingModel.value = false;
       return;
+    } finally {
+      if (isCurrent()) isDownloadingModel.value = false;
     }
-    isDownloadingModel.value = false;
+    // The download can take minutes; the folder may have changed meanwhile.
+    if (!isCurrent()) return;
 
     // Build index from thumbnails
     isIndexing.value = true;
-    indexProgress.value = { completed: 0, total: images.value.length };
+    indexProgress.value = { completed: 0, total: catalog.length };
 
     try {
-      const thumbPaths = images.value.map(
-        (img) => thumbnailPaths.value.get(img.id) ?? ""
-      );
-
       await indexLibrary(
-        images.value.map((img) => img.id),
-        thumbPaths,
+        catalog.map((img) => img.id),
+        catalog.map((img) => paths.get(img.id) ?? ""),
         modelDir,
         indexPath,
         (progress) => {
+          if (!isCurrent()) return;
           indexProgress.value = {
             completed: progress.completed,
             total: progress.total,
           };
         }
       );
-      isIndexReady.value = true;
+      if (isCurrent()) isIndexReady.value = true;
     } catch (e) {
       console.error("Failed to build search index:", e);
     } finally {
-      isIndexing.value = false;
+      if (isCurrent()) isIndexing.value = false;
     }
   }
 
