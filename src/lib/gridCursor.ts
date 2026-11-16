@@ -23,6 +23,8 @@ export interface GridCursor {
    * if it was off screen. Resolves once the card is mounted.
    */
   reveal(mode?: "follow" | "return"): Promise<void>;
+  /** The cursor card's thumbnail container, if mounted: the morph's hero. */
+  currentCard(): HTMLElement | null;
 }
 
 export const activeGridCursor = shallowRef<GridCursor | null>(null);

@@ -74,6 +74,10 @@ export function useGridCursor(options: {
     },
     pageRows: () => grid.value?.pageRows() ?? 1,
     reveal,
+    currentCard: () =>
+      scroller.value?.querySelector<HTMLElement>(
+        `.thumbnail-container[data-index="${index.value}"]`
+      ) ?? null,
   };
 
   // Whether the cursor's card was on screen as last rendered: the state the

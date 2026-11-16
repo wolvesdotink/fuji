@@ -49,6 +49,8 @@ export function useViewTransition() {
 
     await nextTick();
 
+    let destEl: HTMLElement | null = null;
+
     if (!document.startViewTransition) {
       callback();
       await nextTick();
@@ -65,6 +67,7 @@ export function useViewTransition() {
       // restored position, and the hero card must be among them before we
       // look for it below.
       await restoreGridScroll();
+      destEl = await tagGridDestination();
 
       // Wait for the newly-mounted hero image to be paint-ready before the
       // new-state snapshot is captured. Matches either grid→viewer
@@ -88,12 +91,33 @@ export function useViewTransition() {
       // Transition was skipped or aborted — OK
     } finally {
       cleanup(sourceEl);
+      cleanup(destEl);
     }
   }
 
-  function cleanup(sourceEl?: HTMLElement | null) {
-    if (sourceEl) {
-      sourceEl.style.removeProperty("view-transition-name");
+  /**
+   * Viewer → grid: make the cursor's card the hero. The destination is only
+   * known now: leaving the viewer can move the selection (the library store
+   * re-anchors it when the photo just rated no longer passes the filters),
+   * so the id the transition started with may have no card. Tagging by the
+   * cursor's index also avoids a second card with the same file stem.
+   * Returns the tagged element, or null when not returning to a grid or the
+   * card is not mounted (the morph then falls back to a cross-fade).
+   */
+  async function tagGridDestination(): Promise<HTMLElement | null> {
+    const cursor = activeGridCursor.value;
+    if (!cursor) return null;
+    // Drop the id-based tag the cards may have picked up on mount.
+    activeTransitionId.value = null;
+    await nextTick();
+    const el = cursor.currentCard();
+    el?.style.setProperty("view-transition-name", "hero-image");
+    return el;
+  }
+
+  function cleanup(el?: HTMLElement | null) {
+    if (el) {
+      el.style.removeProperty("view-transition-name");
     }
     activeTransitionId.value = null;
   }
