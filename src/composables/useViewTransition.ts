@@ -2,8 +2,18 @@ import { ref, nextTick } from "vue";
 import { activeGridCursor } from "@/lib/gridCursor";
 import type { GridPlace } from "@/components/VirtualGrid.vue";
 
-// Module-level shared state — only one transition at a time
+// Module-level shared state. Transitions can overlap (closing the viewer
+// while the opening morph still runs), so each one gets a token and cleans
+// up only what it still owns: the shared id if no later transition has set
+// it, and the hero names it put on elements.
 const activeTransitionId = ref<string | null>(null);
+let latestToken = 0;
+const heroOwner = new WeakMap<HTMLElement, number>();
+
+function tagHero(el: HTMLElement, token: number) {
+  el.style.setProperty("view-transition-name", "hero-image");
+  heroOwner.set(el, token);
+}
 
 // The grid's place when the viewer replaced it, in the grid's own terms
 // (anchored item and offset), put back when returning to the grid. A raw
@@ -37,14 +47,14 @@ export function useViewTransition() {
     const grid = activeGridCursor.value;
     if (grid) savedGridPlace = grid.capturePlace();
 
+    const token = ++latestToken;
+
     // Set reactive id — needed when cards mount in the new state (single→grid)
     activeTransitionId.value = imageId;
 
     // Imperatively tag the source element (grid→single direction).
     // This bypasses Vue's async style patching entirely.
-    if (sourceEl) {
-      sourceEl.style.setProperty("view-transition-name", "hero-image");
-    }
+    if (sourceEl) tagHero(sourceEl, token);
 
     await nextTick();
 
@@ -54,7 +64,7 @@ export function useViewTransition() {
       callback();
       await nextTick();
       await restoreGridScroll();
-      cleanup(sourceEl);
+      cleanup(token, sourceEl);
       return;
     }
 
@@ -66,7 +76,7 @@ export function useViewTransition() {
       // restored position, and the hero card must be among them before we
       // look for it below.
       await restoreGridScroll();
-      destEl = await tagGridDestination();
+      destEl = await tagGridDestination(token);
 
       // Wait for the newly-mounted hero image to be paint-ready before the
       // new-state snapshot is captured. Matches either grid→viewer
@@ -89,8 +99,7 @@ export function useViewTransition() {
     } catch {
       // Transition was skipped or aborted — OK
     } finally {
-      cleanup(sourceEl);
-      cleanup(destEl);
+      cleanup(token, sourceEl, destEl);
     }
   }
 
@@ -103,22 +112,30 @@ export function useViewTransition() {
    * Returns the tagged element, or null when not returning to a grid or the
    * card is not mounted (the morph then falls back to a cross-fade).
    */
-  async function tagGridDestination(): Promise<HTMLElement | null> {
+  async function tagGridDestination(token: number): Promise<HTMLElement | null> {
     const cursor = activeGridCursor.value;
     if (!cursor) return null;
     // Drop the id-based tag the cards may have picked up on mount.
-    activeTransitionId.value = null;
+    if (token === latestToken) activeTransitionId.value = null;
     await nextTick();
     const el = cursor.currentCard();
-    el?.style.setProperty("view-transition-name", "hero-image");
+    if (el) tagHero(el, token);
     return el;
   }
 
-  function cleanup(el?: HTMLElement | null) {
-    if (el) {
-      el.style.removeProperty("view-transition-name");
+  /**
+   * After a transition finished, was skipped by a later one or failed:
+   * remove the hero names it still owns, and the shared id unless a later
+   * transition has taken it over.
+   */
+  function cleanup(token: number, ...els: (HTMLElement | null | undefined)[]) {
+    for (const el of els) {
+      if (el && heroOwner.get(el) === token) {
+        el.style.removeProperty("view-transition-name");
+        heroOwner.delete(el);
+      }
     }
-    activeTransitionId.value = null;
+    if (token === latestToken) activeTransitionId.value = null;
   }
 
   async function restoreGridScroll() {
