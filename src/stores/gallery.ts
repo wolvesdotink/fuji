@@ -154,6 +154,34 @@ export const useGalleryStore = defineStore("gallery", () => {
   // "bytes are moving right now".
   const ptpDownloadProgress = ref<Map<string, PtpFileProgress>>(new Map());
 
+  /**
+   * Drop everything read from the current card: its catalog, ratings,
+   * thumbnails and downloaded previews. File names repeat across cards and
+   * cameras, so any of these left in place would be credited to the next
+   * card's files — imported, or deleted, from the wrong camera.
+   */
+  function resetCatalog() {
+    images.value = [];
+    ratings.value = new Map();
+    thumbnailPaths.value = new Map();
+    ptpPreviewCache.value = new Map();
+    markedForCompare.value = new Set();
+    currentIndex.value = 0;
+    cameraLoadedNotice.value = false;
+  }
+
+  function isSameCamera(a: CameraVolume | null, b: CameraVolume | null) {
+    return (
+      !!a && !!b && a.mount_path === b.mount_path && a.source_type === b.source_type
+    );
+  }
+
+  /** Make `next` the active camera, discarding the old card's state if it is a different device. */
+  function switchCamera(next: CameraVolume) {
+    if (!isSameCamera(camera.value, next)) resetCatalog();
+    camera.value = next;
+  }
+
   // Actions
   async function scanCamera() {
     isScanning.value = true;
@@ -168,7 +196,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         if (camera.value && camera.value.mount_path === found.mount_path) {
           detectionError.value = null;
         } else {
-          camera.value = found;
+          switchCamera(found);
           detectionError.value = null;
           // Don't switch mode or auto-load — ask the user first via the
           // import prompt. Library stays on-screen; loadImages() runs only
@@ -221,6 +249,9 @@ export const useGalleryStore = defineStore("gallery", () => {
 
   async function loadImages() {
     if (!camera.value) return;
+    // The catalog can take most of a minute. If the camera changes meanwhile,
+    // this result belongs to the old one and must not replace the new state.
+    const cam = camera.value;
     loadError.value = null;
     loadErrorRaw.value = null;
     try {
@@ -229,11 +260,14 @@ export const useGalleryStore = defineStore("gallery", () => {
         const home = await homeDir();
         const cacheDir = await join(home, ".cache", "fuji-culler", "ptp-thumbs");
         isCataloging.value = true;
+        let loaded: ImagePair[];
         try {
-          images.value = await ptpListImages(camera.value.mount_path, cacheDir);
+          loaded = await ptpListImages(cam.mount_path, cacheDir);
         } finally {
           isCataloging.value = false;
         }
+        if (!isSameCamera(camera.value, cam)) return;
+        images.value = loaded;
 
         // Populate thumbnail paths from the known cache naming convention
         // The Swift bridge saves thumbnails as <stem>_thumb.jpg. Plain string
@@ -254,17 +288,22 @@ export const useGalleryStore = defineStore("gallery", () => {
         const home = await homeDir();
         const indexCacheDir = await join(home, ".cache", "fuji-culler");
         isCataloging.value = true;
+        let loaded: ImagePair[];
         try {
-          images.value = await listImages(camera.value.dcim_path, indexCacheDir);
+          loaded = await listImages(cam.dcim_path, indexCacheDir);
         } finally {
           isCataloging.value = false;
         }
+        if (!isSameCamera(camera.value, cam)) return;
+        images.value = loaded;
       }
       ratings.value = new Map();
       // Previews downloaded for an earlier catalog may belong to another card
       // whose files share these names, so they must not be shown or imported.
       ptpPreviewCache.value = new Map();
       currentIndex.value = 0;
+      // Late results below write into this catalog's map, not a later one's.
+      const catalogRatings = ratings.value;
 
       // If the user navigated away while the catalog ran (back to library),
       // surface a "photos ready" notice instead of loading silently.
@@ -286,7 +325,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         readFileRatings(hifPaths, ratingsCacheDir)
           .then((fileRatings) => {
             for (const [stem, rating] of Object.entries(fileRatings)) {
-              ratings.value.set(idByStem.get(stem) ?? stem, rating);
+              catalogRatings.set(idByStem.get(stem) ?? stem, rating);
             }
           })
           .catch((e) => console.error("Failed to read camera ratings:", e));
@@ -310,6 +349,12 @@ export const useGalleryStore = defineStore("gallery", () => {
     );
     if (mediaNeedingThumbs.length === 0) return;
 
+    // Taken before any await: progress for a catalog that has since been
+    // replaced lands in the discarded map instead of showing on the new
+    // card's images.
+    const cam = camera.value;
+    const catalogThumbs = thumbnailPaths.value;
+
     isLoadingThumbnails.value = true;
     thumbnailProgress.value = { completed: 0, total: mediaNeedingThumbs.length };
 
@@ -318,13 +363,13 @@ export const useGalleryStore = defineStore("gallery", () => {
 
     try {
       await generateThumbnails(
-        camera.value.dcim_path,
+        cam.dcim_path,
         mediaNeedingThumbs.map((img) => img.id),
         mediaNeedingThumbs.map((img) => img.raf_path ?? img.hif_path),
         cacheDir,
         (progress) => {
           if (progress.thumbnail_path) {
-            thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+            catalogThumbs.set(progress.image_id, progress.thumbnail_path);
           }
           thumbnailProgress.value = {
             completed: progress.completed,
@@ -644,7 +689,7 @@ export const useGalleryStore = defineStore("gallery", () => {
     ) {
       return;
     }
-    camera.value = vol;
+    switchCamera(vol);
     // Ask the user before switching mode or reading the card. The prompt
     // (requestImportPrompt) is idempotent so it's safe even if scanCamera
     // already fired for this device.
@@ -653,11 +698,7 @@ export const useGalleryStore = defineStore("gallery", () => {
 
   function clearCameraState() {
     camera.value = null;
-    images.value = [];
-    ratings.value = new Map();
-    ptpPreviewCache.value = new Map();
-    markedForCompare.value = new Set();
-    currentIndex.value = 0;
+    resetCatalog();
     importState.value = "idle";
     importProgress.value = null;
     importStartedAt.value = null;
