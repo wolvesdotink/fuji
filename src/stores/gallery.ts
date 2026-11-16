@@ -353,10 +353,9 @@ export const useGalleryStore = defineStore("gallery", () => {
   async function loadThumbnails() {
     if (!camera.value || images.value.length === 0) return;
 
-    const media = images.value.filter(
-      (img) => img.raf_path || img.media_type === "Video"
-    );
-    if (media.length === 0) return;
+    // Every still gets a thumbnail, RAF-paired or not, so the grid never
+    // decodes a full-resolution HIF/JPEG per card.
+    const media = images.value;
 
     // Taken before any await: progress for a catalog that has since been
     // replaced lands in the discarded map instead of showing on the new
@@ -372,6 +371,8 @@ export const useGalleryStore = defineStore("gallery", () => {
     try {
       await generateThumbnails(
         media.map((img) => img.id),
+        // Prefer the RAF when there is one: its embedded 4416px JPEG
+        // thumbnails ~4x faster than the 40 MP HIF.
         media.map((img) => img.raf_path ?? img.hif_path),
         cacheDir,
         (batch) => {

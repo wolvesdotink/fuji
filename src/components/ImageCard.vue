@@ -46,19 +46,9 @@ const thumbnailSrc = computed(() => {
     // directly via the asset protocol).
     return "";
   }
-  // A mass-storage image with a RAF sibling has a thumbnail in flight
-  // (loadThumbnails only processes images where raf_path is set), so show the
-  // shimmer skeleton rather than decoding the multi-MB HIF as a stand-in —
-  // that stalls the grid. But an image with no RAF sibling (HEIF-only or
-  // JPEG-only shoot) never gets a generated thumbnail, so fall back to the
-  // HEIF/JPEG itself; otherwise the card shimmers forever and never shows the
-  // photo. loading="lazy" + content-visibility keep this to on-screen decodes.
-  if (props.image.media_type === "Video") {
-    return "";
-  }
-  if (!props.image.raf_path) {
-    return fileUrl(props.image.hif_path);
-  }
+  // Mass storage: loadThumbnails generates a thumbnail for every still and
+  // movie, RAF-paired or not, so show the shimmer skeleton until it lands
+  // rather than decoding the full-resolution HIF/JPEG as a stand-in.
   return "";
 });
 
