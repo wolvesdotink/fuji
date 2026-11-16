@@ -135,3 +135,8 @@ test("a failing command rejects instead of leaving the caller pending", async ()
     /Failed to create cache dir/
   );
 });
+
+test("the @/ alias resolves a directory import to its index.ts", async () => {
+  // src/types is a directory; a runtime import must load src/types/index.ts.
+  await import("@/types");
+});
