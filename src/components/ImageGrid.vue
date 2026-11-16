@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { useGalleryStore } from "@/stores/gallery";
 import ImageCard from "./ImageCard.vue";
+import VirtualGrid from "./VirtualGrid.vue";
+import type { ImagePair } from "@/types";
 
 const store = useGalleryStore();
+const imageKey = (image: ImagePair) => image.id;
 </script>
 
 <template>
@@ -14,14 +17,11 @@ const store = useGalleryStore();
       ></div>
     </div>
 
-    <div class="image-grid">
-      <ImageCard
-        v-for="(image, index) in store.images"
-        :key="image.id"
-        :image="image"
-        :index="index"
-      />
-    </div>
+    <VirtualGrid class="image-grid" :items="store.images" :item-key="imageKey">
+      <template #default="{ item, index }">
+        <ImageCard :image="item" :index="index" />
+      </template>
+    </VirtualGrid>
   </div>
 </template>
 
@@ -45,11 +45,5 @@ const store = useGalleryStore();
   background: linear-gradient(90deg, var(--color-accent), var(--color-heif-raw));
   transition: width 0.3s ease;
   border-radius: 1px;
-}
-
-.image-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-  gap: 14px;
 }
 </style>
