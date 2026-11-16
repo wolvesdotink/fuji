@@ -67,6 +67,9 @@
   --color-accent-hover: #d4b25e;
   --color-accent-dim: rgba(196, 162, 78, 0.1);
 
+  /* Grid keyboard cursor: a gold ring 2px outside the card */
+  --cursor-ring: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-accent);
+
   /* Selection colors — warmer, richer variants */
   --color-skip: #c24242;
   --color-skip-light: #e89c9c;

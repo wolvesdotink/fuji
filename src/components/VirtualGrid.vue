@@ -160,9 +160,12 @@ function resolveIndex(item: T): number | undefined {
 }
 
 function recordAnchor() {
-  if (!scrollEl || rowHeight.value <= 0) return;
+  // An empty list is a pause (filters or a search hiding everything), not
+  // a new place: the scroll position collapses to 0 meanwhile, which must
+  // not replace the anchor the list is restored to when it comes back.
+  if (!scrollEl || rowHeight.value <= 0 || props.items.length === 0) return;
   const top = scrollEl.scrollTop - gridOffset();
-  if (scrollEl.scrollTop <= 0 || top <= 0 || props.items.length === 0) {
+  if (scrollEl.scrollTop <= 0 || top <= 0) {
     anchor = null;
     return;
   }
@@ -199,7 +202,7 @@ let reanchorQueued = false;
  * and the browser would clamp it). Both happen before the next paint.
  */
 function reanchor() {
-  if (!scrollEl || rowHeight.value <= 0) return;
+  if (!scrollEl || rowHeight.value <= 0 || props.items.length === 0) return;
   if (!anchor) {
     update();
     return;
@@ -230,16 +233,34 @@ function scrollToPosition(scrollTop: number) {
 }
 
 /**
+ * Below this a measured row height is noise, not a layout change. WebKit
+ * snaps each box's edges to 1/64px, so the same card measures up to 1/64px
+ * taller or shorter depending on its fractional position: measured at the top
+ * of the grid on mount and again at a restored position mid-list, it differs.
+ * Taken as a change, re-applying the anchor at the new pitch moved the view
+ * by rows × 1/64px (8px at row 500) on every return from the viewer. A real
+ * change is far larger: one pixel of window width changes a card's height by
+ * well over 0.05px at any column count the grid reaches.
+ */
+const PITCH_NOISE = 1 / 32;
+
+/**
  * Re-read the geometry; re-apply the anchor if the column count or row
  * height changed. Unchanged geometry, including the first measurement on
  * mount, leaves scrollTop alone.
  */
 function remeasure() {
-  const before = rowHeight.value > 0 ? { columns: columns.value, pitch: rowPitch.value } : null;
+  const before =
+    rowHeight.value > 0
+      ? { columns: columns.value, pitch: rowPitch.value, height: rowHeight.value }
+      : null;
   measure();
   const changed =
     before !== null &&
-    (before.columns !== columns.value || Math.abs(before.pitch - rowPitch.value) > 0.001);
+    (before.columns !== columns.value ||
+      Math.abs(before.pitch - rowPitch.value) > PITCH_NOISE);
+  // Keep the pitch the current positions were computed with.
+  if (before !== null && !changed) rowHeight.value = before.height;
   if (changed) reanchor();
   else update();
 }
@@ -247,20 +268,22 @@ function remeasure() {
 /**
  * Scroll so that item `index` is visible. `block: "nearest"` scrolls the
  * least amount needed (nothing if it is already fully visible); `"center"`
- * centres its row. The rows are mounted synchronously, but the cards are in
+ * centres its row. `margin` (pixels) is kept clear above or below the row
+ * with "nearest", for decorations drawn outside the card such as the keyboard
+ * cursor's ring. The rows are mounted synchronously, but the cards are in
  * the DOM only after Vue's next render: wait a tick (`await nextTick()`)
  * before querying them.
  */
-function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
+function scrollToIndex(index: number, block: "nearest" | "center" = "nearest", margin = 0) {
   if (!scrollEl || rowHeight.value <= 0 || index < 0 || index >= props.items.length) return;
   const row = Math.floor(index / columns.value);
-  const rowTop = gridOffset() + row * rowPitch.value;
-  const rowBottom = rowTop + rowHeight.value;
+  const rowTop = gridOffset() + row * rowPitch.value - margin;
+  const rowBottom = rowTop + rowHeight.value + 2 * margin;
   const viewTop = scrollEl.scrollTop;
   const viewHeight = scrollEl.clientHeight;
   let target = viewTop;
   if (block === "center") {
-    target = rowTop - (viewHeight - rowHeight.value) / 2;
+    target = rowTop + margin - (viewHeight - rowHeight.value) / 2;
   } else if (rowTop < viewTop) {
     target = rowTop;
   } else if (rowBottom > viewTop + viewHeight) {
@@ -269,18 +292,61 @@ function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
   scrollToPosition(target);
 }
 
+/** Rows that fit in the viewport (at least 1): the step for Page Up / Page Down. */
+function pageRows(): number {
+  if (!scrollEl || rowPitch.value <= 0) return 1;
+  return Math.max(Math.floor((scrollEl.clientHeight + rowGap.value) / rowPitch.value), 1);
+}
+
+/**
+ * The user's place in item terms (the anchor), for putting the grid back
+ * after it was unmounted (the viewer replaces it). Null at the top.
+ */
+function capturePlace(): GridPlace {
+  return { anchor: anchor ? { ...anchor } : null } as unknown as GridPlace;
+}
+
+/**
+ * Put a place from capturePlace() back: the same item at the same offset
+ * from the viewport top, under the current geometry, and make it the anchor,
+ * so a later re-measure re-applies it rather than shifting it. The rows are
+ * mounted synchronously; the cards are in the DOM after the next render.
+ * Returns false (and leaves the position alone) when the anchored item is
+ * not in this list, such as a place taken in the other grid.
+ */
+function restorePlace(place: GridPlace): boolean {
+  if (!scrollEl || rowHeight.value <= 0) return false;
+  const saved = (place as unknown as { anchor: Anchor | null }).anchor;
+  if (!saved) {
+    anchor = null;
+    scrollToPosition(0);
+    return true;
+  }
+  const hit = resolveIndex(saved.item);
+  if (hit === undefined) return false;
+  anchor = { ...saved, item: props.items[hit], index: hit };
+  const target = anchorTarget(anchor);
+  setWindow(target);
+  const max = scrollEl.scrollHeight - scrollEl.clientHeight;
+  scrollEl.scrollTop = Math.round(Math.max(anchor.atBottom ? max : Math.min(target, max), 0));
+  programmaticTop = scrollEl.scrollTop;
+  update();
+  return true;
+}
+
 defineExpose({
   scrollToIndex,
+  pageRows,
+  capturePlace,
+  restorePlace,
   /** Current column count; reactive, readonly. */
   columns: readonly(columns),
 });
 
 // Scroll events are handled synchronously (no rAF throttle): WebKit already
 // fires them once per frame, and updating in the same frame keeps freshly
-// exposed rows from being painted blank. useViewTransition restores a scroll
-// position by dispatching a synthetic scroll event, so the matching rows are
-// mounted before the view-transition snapshot; an untrusted event is taken as
-// such a deliberate position and always sets the anchor.
+// exposed rows from being painted blank. An untrusted (synthetic) scroll
+// event is taken as a deliberate position and always sets the anchor.
 function onScroll(e: Event) {
   if (!scrollEl || rowHeight.value <= 0) return;
   const echo =
@@ -380,6 +446,12 @@ watch(
 watch(
   [() => props.items, () => props.items.length],
   () => {
+    // Going empty keeps the anchor and the last non-empty list, so the next
+    // list is matched against what the user last saw (see recordAnchor).
+    if (props.items.length === 0 && rowHeight.value > 0) {
+      update();
+      return;
+    }
     const prevItems = listItems;
     const prevIndexOf = indexOf;
     listItems = props.items.slice();
@@ -412,8 +484,19 @@ onBeforeUnmount(() => {
  * through a template ref. After scrollToIndex() the target cards are mounted
  * on Vue's next render: `await nextTick()` before querying them.
  */
+/** A grid position from capturePlace(); opaque to callers. */
+export interface GridPlace {
+  readonly __gridPlace: true;
+}
+
 export interface VirtualGridHandle {
-  scrollToIndex(index: number, block?: "nearest" | "center"): void;
+  scrollToIndex(index: number, block?: "nearest" | "center", margin?: number): void;
+  /** Rows that fit in the viewport (at least 1). */
+  pageRows(): number;
+  /** The user's place, for restorePlace() after a remount. */
+  capturePlace(): GridPlace;
+  /** Put a captured place back; false if its item is not in this list. */
+  restorePlace(place: GridPlace): boolean;
   /** Current column count. Reactive when read through the component ref. */
   readonly columns: number;
 }

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { storeToRefs } from "pinia";
 import { useGalleryStore } from "@/stores/gallery";
 import ImageCard from "./ImageCard.vue";
 import VirtualGrid, { type VirtualGridHandle } from "./VirtualGrid.vue";
+import { useGridCursor } from "@/composables/useGridCursor";
 import type { ImagePair } from "@/types";
 
 const store = useGalleryStore();
@@ -14,14 +16,25 @@ const grid = ref<VirtualGridHandle | null>(null);
 // Forwarded for the keyboard cursor; see VirtualGridHandle (wait a tick after
 // scrollToIndex() before querying the newly mounted cards).
 defineExpose({
-  scrollToIndex: (index: number, block?: "nearest" | "center") =>
-    grid.value?.scrollToIndex(index, block),
+  scrollToIndex: (index: number, block?: "nearest" | "center", margin?: number) =>
+    grid.value?.scrollToIndex(index, block, margin),
+  pageRows: () => grid.value?.pageRows() ?? 1,
   columns: computed(() => grid.value?.columns ?? 1),
+});
+
+// Keyboard cursor: keep currentIndex in range and its card on screen.
+const container = ref<HTMLElement | null>(null);
+useGridCursor({
+  scroller: container,
+  grid,
+  index: storeToRefs(store).currentIndex,
+  count: () => store.images.length,
+  list: () => store.images,
 });
 </script>
 
 <template>
-  <div class="image-grid-container">
+  <div ref="container" class="image-grid-container">
     <div class="loading-bar" v-if="store.isLoadingThumbnails">
       <div
         class="loading-progress"
@@ -32,6 +45,8 @@ defineExpose({
     <VirtualGrid
       ref="grid"
       class="image-grid"
+      role="list"
+      aria-label="Photos and videos"
       :items="store.images"
       :item-key="imageKey"
       :anchor-key="anchorKey"

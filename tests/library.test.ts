@@ -427,3 +427,65 @@ test("clearing the search drops a search still in flight", async () => {
   assert.equal(store.searchResults, null);
   assert.equal(store.isSearching, false);
 });
+
+/** n images, newest first in the default (created) sort. */
+function catalog(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    ...image(`DSCF${String(i + 1).padStart(4, "0")}`),
+    date_created: n - i,
+  }));
+}
+
+test("clearing filters that hid everything returns to the photo selected before", async () => {
+  const store = useLibraryStore();
+  store.images = catalog(50);
+  await tick();
+  store.currentIndex = 30;
+  await tick();
+  store.setRatingFilter(5); // nothing is rated: empty
+  await tick();
+  assert.equal(store.displayImages.length, 0);
+  store.clearFilters();
+  await tick();
+  assert.equal(store.currentImage?.id, "DSCF0031");
+});
+
+test("clearing a search that found nothing returns to the photo selected before", async () => {
+  const store = useLibraryStore();
+  store.images = catalog(50);
+  await tick();
+  store.currentIndex = 12;
+  await tick();
+  store.searchQuery = "nothing";
+  store.searchResults = [];
+  await tick();
+  assert.equal(store.displayImages.length, 0);
+  store.clearSearch();
+  await tick();
+  assert.equal(store.currentImage?.id, "DSCF0013");
+});
+
+test("a cleared search with results still starts at the top", async () => {
+  const store = useLibraryStore();
+  store.images = catalog(50);
+  await tick();
+  store.currentIndex = 12;
+  await tick();
+  store.searchQuery = "some";
+  store.searchResults = [{ image_id: "DSCF0020", score: 1 }];
+  await tick();
+  store.clearSearch();
+  await tick();
+  assert.equal(store.currentIndex, 0);
+});
+
+test("clearing a search when none is active keeps the selection", async () => {
+  const store = useLibraryStore();
+  store.images = catalog(50);
+  await tick();
+  store.currentIndex = 7;
+  await tick();
+  store.clearSearch();
+  await tick();
+  assert.equal(store.currentIndex, 7);
+});

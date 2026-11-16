@@ -1,13 +1,25 @@
 import { ref, nextTick } from "vue";
+import { activeGridCursor } from "@/lib/gridCursor";
+import type { GridPlace } from "@/components/VirtualGrid.vue";
 
-// Module-level shared state — only one transition at a time
+// Module-level shared state. Transitions can overlap (closing the viewer
+// while the opening morph still runs), so each one gets a token and cleans
+// up only what it still owns: the shared id if no later transition has set
+// it, and the hero names it put on elements.
 const activeTransitionId = ref<string | null>(null);
+let latestToken = 0;
+const heroOwner = new WeakMap<HTMLElement, number>();
 
-// Persisted grid scroll position so we can restore it when returning from the viewer
-let savedGridScrollTop: number | null = null;
+function tagHero(el: HTMLElement, token: number) {
+  el.style.setProperty("view-transition-name", "hero-image");
+  heroOwner.set(el, token);
+}
 
-const GRID_CONTAINER_SELECTOR =
-  ".image-grid-container, .library-grid-container";
+// The grid's place when the viewer replaced it, in the grid's own terms
+// (anchored item and offset), put back when returning to the grid. A raw
+// scrollTop would land elsewhere if the geometry changed meanwhile (a window
+// resize in the viewer), and a later re-measure would move it.
+let savedGridPlace: GridPlace | null = null;
 
 export function useViewTransition() {
   /**
@@ -31,28 +43,28 @@ export function useViewTransition() {
     callback: () => void,
     sourceEl?: HTMLElement | null
   ): Promise<void> {
-    // Save grid scroll position before any transition (if grid is visible)
-    const gridContainer = document.querySelector(GRID_CONTAINER_SELECTOR);
-    if (gridContainer) {
-      savedGridScrollTop = gridContainer.scrollTop;
-    }
+    // Leaving a grid: remember its place.
+    const grid = activeGridCursor.value;
+    if (grid) savedGridPlace = grid.capturePlace();
+
+    const token = ++latestToken;
 
     // Set reactive id — needed when cards mount in the new state (single→grid)
     activeTransitionId.value = imageId;
 
     // Imperatively tag the source element (grid→single direction).
     // This bypasses Vue's async style patching entirely.
-    if (sourceEl) {
-      sourceEl.style.setProperty("view-transition-name", "hero-image");
-    }
+    if (sourceEl) tagHero(sourceEl, token);
 
     await nextTick();
+
+    let destEl: HTMLElement | null = null;
 
     if (!document.startViewTransition) {
       callback();
       await nextTick();
       await restoreGridScroll();
-      cleanup(sourceEl);
+      cleanup(token, sourceEl);
       return;
     }
 
@@ -64,6 +76,7 @@ export function useViewTransition() {
       // restored position, and the hero card must be among them before we
       // look for it below.
       await restoreGridScroll();
+      destEl = await tagGridDestination(token);
 
       // Wait for the newly-mounted hero image to be paint-ready before the
       // new-state snapshot is captured. Matches either grid→viewer
@@ -86,28 +99,56 @@ export function useViewTransition() {
     } catch {
       // Transition was skipped or aborted — OK
     } finally {
-      cleanup(sourceEl);
+      cleanup(token, sourceEl, destEl);
     }
   }
 
-  function cleanup(sourceEl?: HTMLElement | null) {
-    if (sourceEl) {
-      sourceEl.style.removeProperty("view-transition-name");
+  /**
+   * Viewer → grid: make the cursor's card the hero. The destination is only
+   * known now: leaving the viewer can move the selection (the library store
+   * re-anchors it when the photo just rated no longer passes the filters),
+   * so the id the transition started with may have no card. Tagging by the
+   * cursor's index also avoids a second card with the same file stem.
+   * Returns the tagged element, or null when not returning to a grid or the
+   * card is not mounted (the morph then falls back to a cross-fade).
+   */
+  async function tagGridDestination(token: number): Promise<HTMLElement | null> {
+    const cursor = activeGridCursor.value;
+    if (!cursor) return null;
+    // Drop the id-based tag the cards may have picked up on mount.
+    if (token === latestToken) activeTransitionId.value = null;
+    await nextTick();
+    const el = cursor.currentCard();
+    if (el) tagHero(el, token);
+    return el;
+  }
+
+  /**
+   * After a transition finished, was skipped by a later one or failed:
+   * remove the hero names it still owns, and the shared id unless a later
+   * transition has taken it over.
+   */
+  function cleanup(token: number, ...els: (HTMLElement | null | undefined)[]) {
+    for (const el of els) {
+      if (el && heroOwner.get(el) === token) {
+        el.style.removeProperty("view-transition-name");
+        heroOwner.delete(el);
+      }
     }
-    activeTransitionId.value = null;
+    if (token === latestToken) activeTransitionId.value = null;
   }
 
   async function restoreGridScroll() {
-    if (savedGridScrollTop === null) return;
-    const gridContainer = document.querySelector(GRID_CONTAINER_SELECTOR);
-    if (gridContainer) {
-      gridContainer.scrollTop = savedGridScrollTop;
-      // The browser fires the scroll event on its next frame, after the
-      // view-transition snapshot. Dispatch it now so VirtualGrid mounts the
-      // rows for the restored position, then let Vue patch the DOM.
-      gridContainer.dispatchEvent(new Event("scroll"));
-      await nextTick();
-    }
+    const grid = activeGridCursor.value;
+    if (!grid) return; // not returning to a grid
+    // Put the grid's place back and let Vue mount its rows before the
+    // view-transition snapshot. A place from the other grid doesn't apply.
+    if (savedGridPlace && grid.restorePlace(savedGridPlace)) await nextTick();
+    // The viewer may have moved far from the photo the grid was left on.
+    // The restored position stands while the current photo is fully visible
+    // in it; otherwise the grid brings it into view, so the cursor is on
+    // screen and the hero card is mounted before the snapshot.
+    await grid.reveal("return");
   }
 
   return { activeTransitionId, startTransition };

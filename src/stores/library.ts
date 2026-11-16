@@ -184,6 +184,11 @@ export const useLibraryStore = defineStore("library", () => {
     prevIndex: number,
     list: LibraryImage[] = displayImages.value
   ) {
+    // Coming back from an empty list: anchor on what was current before it
+    // went empty.
+    if (prevList.length === 0 && beforeEmpty) {
+      ({ list: prevList, index: prevIndex } = beforeEmpty);
+    }
     const prev = prevList[prevIndex];
     if (list.length === 0 || !prev) {
       currentIndex.value = 0;
@@ -275,6 +280,12 @@ export const useLibraryStore = defineStore("library", () => {
   // last mutation of the list's inputs.
   let resetFor: LibraryImage[] | null = null;
 
+  // The list and selection from just before the list last went empty
+  // (filters or a search hiding everything). Clearing those filters, or a
+  // search that found nothing, brings the user back to that photo rather
+  // than to the top. Dropped once the list has items again.
+  let beforeEmpty: { list: LibraryImage[]; index: number } | null = null;
+
   function resetSelection() {
     currentIndex.value = 0;
     resetFor = displayImages.value;
@@ -300,6 +311,9 @@ export const useLibraryStore = defineStore("library", () => {
     const reset = list === resetFor;
     resetFor = null;
     if (list.length === 0) {
+      if (!beforeEmpty && prevList && prevList.length > 0) {
+        beforeEmpty = { list: prevList, index: prevIdx };
+      }
       currentIndex.value = 0;
       if (viewMode.value === "single") viewMode.value = "grid";
       return;
@@ -309,6 +323,7 @@ export const useLibraryStore = defineStore("library", () => {
     } else if (idx >= list.length || idx < 0) {
       currentIndex.value = list.length - 1;
     }
+    beforeEmpty = null;
   });
 
   function setRatingFilter(f: RatingFilter) {
@@ -637,9 +652,17 @@ export const useLibraryStore = defineStore("library", () => {
   function clearSearch() {
     searchSeq++;
     isSearching.value = false;
+    // Nothing to clear: keep the selection (the search box calls this as
+    // well when its text is emptied).
+    if (searchResults.value === null && !searchQuery.value) return;
+    // A search that found nothing never moved the user: put them back on
+    // the photo they had before it. Any other cleared search starts at the
+    // top, like a new search.
+    const restore = displayImages.value.length === 0 ? beforeEmpty : null;
     searchQuery.value = "";
     searchResults.value = null;
-    resetSelection();
+    if (restore) reanchor(restore.list, restore.index);
+    else resetSelection();
   }
 
   // Flush pending writes before page unload
