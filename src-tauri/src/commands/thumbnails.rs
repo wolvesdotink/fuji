@@ -171,16 +171,28 @@ pub(crate) fn generate_thumbnail_file(source_path: &str, thumb_path: &Path) -> R
     result
 }
 
-/// Counting semaphore.
+/// Counting semaphore with FIFO handoff: permits are granted in the order
+/// callers asked for them (ticket order), so a small request queued behind a
+/// large batch is not overtaken by threads that arrive later.
 pub(crate) struct Semaphore {
-    free: Mutex<usize>,
+    state: Mutex<SemState>,
     cv: Condvar,
+}
+
+struct SemState {
+    free: usize,
+    next_ticket: u64,
+    serving: u64,
 }
 
 impl Semaphore {
     pub(crate) fn new(n: usize) -> Self {
         Semaphore {
-            free: Mutex::new(n.max(1)),
+            state: Mutex::new(SemState {
+                free: n.max(1),
+                next_ticket: 0,
+                serving: 0,
+            }),
             cv: Condvar::new(),
         }
     }
@@ -189,26 +201,31 @@ impl Semaphore {
         struct Permit<'a>(&'a Semaphore);
         impl Drop for Permit<'_> {
             fn drop(&mut self) {
-                *self.0.free.lock().unwrap() += 1;
-                self.0.cv.notify_one();
+                self.0.state.lock().unwrap().free += 1;
+                self.0.cv.notify_all();
             }
         }
-        let mut free = self.free.lock().unwrap();
-        while *free == 0 {
-            free = self.cv.wait(free).unwrap();
+        let mut st = self.state.lock().unwrap();
+        let ticket = st.next_ticket;
+        st.next_ticket += 1;
+        while ticket != st.serving || st.free == 0 {
+            st = self.cv.wait(st).unwrap();
         }
-        *free -= 1;
-        drop(free);
+        st.free -= 1;
+        st.serving += 1;
+        drop(st);
+        // The next ticket may be grantable right away.
+        self.cv.notify_all();
         // Released on drop, so a panicking job cannot leak its permit.
         let _permit = Permit(self);
         f()
     }
 }
 
-/// Concurrency limits for thumbnail work. The commands share one process-wide
-/// pool ([`ThumbnailPool::global`]), so a library load and a camera catalog
-/// running at the same time split the same decode and Quick Look slots
-/// instead of doubling them.
+/// Concurrency limits for thumbnail work. All thumbnail commands share one
+/// process-wide pool ([`ThumbnailPool::global`]), so a library load and a
+/// camera catalog running at the same time split the same decode and Quick
+/// Look slots instead of doubling them.
 pub(crate) struct ThumbnailPool {
     /// Threads spawned per call (each blocks on a slot before working).
     workers: usize,
@@ -228,6 +245,16 @@ impl ThumbnailPool {
         }
     }
 
+    /// Run `f` holding the slot that `source` needs (Quick Look for movies,
+    /// a decode slot for stills).
+    fn run<T>(&self, source: &str, f: impl FnOnce() -> T) -> T {
+        if is_video_path(source) {
+            self.video.run(f)
+        } else {
+            self.decode.run(f)
+        }
+    }
+
     pub(crate) fn global() -> &'static ThumbnailPool {
         static POOL: OnceLock<ThumbnailPool> = OnceLock::new();
         POOL.get_or_init(|| ThumbnailPool::new(default_workers(), MAX_VIDEO_JOBS))
@@ -237,8 +264,11 @@ impl ThumbnailPool {
 /// One thumbnail to generate. Several ids can map to the same cache file (the
 /// recursive library can hold the same camera file name in several folders);
 /// they share one job so the file is decoded and written once.
+///
+/// Such ids can come with different source files. They are tried in input
+/// order until one succeeds, so one unreadable copy does not fail the others.
 struct Job<'a> {
-    source: &'a str,
+    sources: Vec<&'a str>,
     thumb_path: PathBuf,
     ids: Vec<&'a String>,
 }
@@ -284,7 +314,11 @@ fn generate_with(
     for (id, source) in ids.iter().zip(sources) {
         let thumb_path = cache.join(thumb_file_name(id));
         if let Some(&j) = job_by_path.get(&thumb_path) {
-            jobs[j].ids.push(id);
+            let job = &mut jobs[j];
+            job.ids.push(id);
+            if !job.sources.contains(&source.as_str()) {
+                job.sources.push(source);
+            }
         } else if thumb_path.exists() {
             result.items.push(ThumbnailEntry {
                 image_id: id.clone(),
@@ -293,7 +327,7 @@ fn generate_with(
         } else {
             job_by_path.insert(thumb_path.clone(), jobs.len());
             jobs.push(Job {
-                source,
+                sources: vec![source],
                 thumb_path,
                 ids: vec![id],
             });
@@ -327,12 +361,13 @@ fn generate_with(
             scope.spawn(move || loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some(job) = jobs.get(i) else { break };
-                let slots = if is_video_path(job.source) {
-                    &pool.video
-                } else {
-                    &pool.decode
-                };
-                let outcome = slots.run(|| generate(job.source, &job.thumb_path));
+                let mut outcome = Err("no source".to_string());
+                for source in &job.sources {
+                    outcome = pool.run(source, || generate(source, &job.thumb_path));
+                    if outcome.is_ok() {
+                        break;
+                    }
+                }
                 if tx.send((i, outcome)).is_err() {
                     break;
                 }
@@ -442,7 +477,9 @@ pub async fn get_thumbnail(
 
         let thumb_path = cache.join(thumb_file_name(&image_id));
         if !thumb_path.exists() {
-            generate_thumbnail_file(&raf_path, &thumb_path)?;
+            ThumbnailPool::global().run(&raf_path, || {
+                generate_thumbnail_file(&raf_path, &thumb_path)
+            })?;
         }
         Ok(thumb_path.to_string_lossy().to_string())
     })
@@ -699,6 +736,52 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(batches.last().unwrap().1.completed, 3);
         fs::remove_dir_all(&cache).ok();
+    }
+
+    #[test]
+    fn duplicate_ids_try_the_next_source_after_a_failure() {
+        let cache = temp_dir("dupe_fallback");
+        let calls = Mutex::new(Vec::new());
+        let record = |source: &str, thumb: &Path| {
+            calls.lock().unwrap().push(source.to_string());
+            fake_write(source, thumb)
+        };
+        let ids = strings(&["X", "X", "X"]);
+        let sources = strings(&["/a/bad.JPG", "/b/ok.JPG", "/c/ok.JPG"]);
+        let (_, result) = run_fake(&ids, &sources, &cache, 2, &record);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            strings(&["/a/bad.JPG", "/b/ok.JPG"])
+        );
+        assert_eq!(result.items.len(), 3);
+        assert!(result.failed.is_empty());
+        fs::remove_dir_all(&cache).ok();
+    }
+
+    #[test]
+    fn slots_are_granted_in_request_order() {
+        let sem = Semaphore::new(1);
+        let order = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            let (hold_tx, hold_rx) = mpsc::channel::<()>();
+            let (held_tx, held_rx) = mpsc::channel::<()>();
+            let sem = &sem;
+            s.spawn(move || {
+                sem.run(|| {
+                    held_tx.send(()).unwrap();
+                    hold_rx.recv().unwrap();
+                })
+            });
+            held_rx.recv().unwrap();
+            // Queue waiters one at a time so their tickets are 1, 2, 3, ...
+            for i in 0..6 {
+                let order = &order;
+                s.spawn(move || sem.run(|| order.lock().unwrap().push(i)));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            hold_tx.send(()).unwrap();
+        });
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
