@@ -369,6 +369,12 @@ export const useLibraryStore = defineStore("library", () => {
   // gallery.ts's catalogGeneration).
   let loadGeneration = 0;
 
+  // Bumped by every search, by clearSearch and by a folder load. A search
+  // only applies its outcome (results, failure, isSearching) while it is
+  // still the newest one and its folder is still loaded: responses can
+  // arrive out of order, and after the folder they were made for is gone.
+  let searchSeq = 0;
+
   // Paths the user rated since the current folder's ratings read started.
   // That read reflects the files before those edits, so it must not
   // overwrite them, whether or not the edit's debounced write has flushed
@@ -392,6 +398,16 @@ export const useLibraryStore = defineStore("library", () => {
     isIndexing.value = false;
     indexProgress.value = { completed: 0, total: 0 };
     isIndexReady.value = false;
+    // Starting a load ends the current search. Bumping the generation above
+    // already invalidated a search in flight, so it will never settle its
+    // own flag or apply its results; drop the whole search here rather than
+    // leave its query next to an older query's results. This must not wait
+    // for the listing: if the listing fails, nothing later would do it, and
+    // the previous catalog stays on screen unfiltered with an empty query.
+    searchSeq++;
+    isSearching.value = false;
+    searchResults.value = null;
+    searchQuery.value = "";
     isLoading.value = true;
     try {
       const home = await homeDir();
@@ -402,6 +418,8 @@ export const useLibraryStore = defineStore("library", () => {
       viewMode.value = "grid";
       images.value = listed;
       thumbnailPaths.value = new Map();
+      searchSeq++;
+      isSearching.value = false;
       searchResults.value = null;
       searchQuery.value = "";
       ratings.value = new Map();
@@ -588,6 +606,9 @@ export const useLibraryStore = defineStore("library", () => {
 
     searchQuery.value = query;
     isSearching.value = true;
+    const seq = ++searchSeq;
+    const generation = loadGeneration;
+    const isCurrent = () => seq === searchSeq && generation === loadGeneration;
 
     try {
       const home = await homeDir();
@@ -599,17 +620,23 @@ export const useLibraryStore = defineStore("library", () => {
         "clip-index.bin"
       );
 
-      searchResults.value = await searchLibrary(query, modelDir, indexPath);
+      const results = await searchLibrary(query, modelDir, indexPath);
+      if (!isCurrent()) return;
+      searchResults.value = results;
       resetSelection();
     } catch (e) {
       console.error("Search failed:", e);
-      searchResults.value = [];
+      if (isCurrent()) searchResults.value = [];
     } finally {
-      isSearching.value = false;
+      // A superseded search leaves the flag to the search (or clear) that
+      // replaced it, which always settles it.
+      if (isCurrent()) isSearching.value = false;
     }
   }
 
   function clearSearch() {
+    searchSeq++;
+    isSearching.value = false;
     searchQuery.value = "";
     searchResults.value = null;
     resetSelection();

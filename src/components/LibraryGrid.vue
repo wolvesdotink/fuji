@@ -7,7 +7,9 @@ import { describeFilters } from "@/lib/libraryFilter";
 import type { LibraryImage } from "@/types";
 
 const store = useLibraryStore();
-const imageKey = (image: LibraryImage) => image.id;
+// Card key: the file path, not the id. Ids are file stems and repeat across
+// subfolders, and duplicate keys left stale cards behind on re-sorts.
+const imageKey = (image: LibraryImage) => image.file_path;
 // Unique per file across library reloads (ids are stems and can repeat).
 const anchorKey = (image: LibraryImage) => image.file_path;
 

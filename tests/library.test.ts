@@ -44,6 +44,7 @@ function backend() {
   const modelChannels: number[] = [];
   const listings = new Map<string, Deferred<unknown>>();
   const indexCalls: { ids: string[]; paths: string[] }[] = [];
+  const searches: { query: string; d: Deferred<unknown> }[] = [];
   mockIPC((cmd, args: any) => {
     switch (cmd) {
       case "plugin:path|resolve_directory":
@@ -77,6 +78,11 @@ function backend() {
       case "index_library":
         indexCalls.push({ ids: args.imageIds, paths: args.thumbPaths });
         return null;
+      case "search_library": {
+        const d = deferred<unknown>();
+        searches.push({ query: args.query, d });
+        return d.promise;
+      }
       default:
         throw new Error(`unexpected command ${cmd}`);
     }
@@ -92,7 +98,14 @@ function backend() {
       index,
       message: { bytes_downloaded: bytes, bytes_total: 100, file_name: "model" },
     });
-  return { thumbs, models, indexCalls, finishThumbs, listings, modelProgress };
+  /** Resolve the pending search for `query` with these image ids, best first. */
+  const answerSearch = (query: string, ids: string[]) =>
+    searches
+      .find((s) => s.query === query)!
+      .d.resolve(ids.map((image_id, i) => ({ image_id, score: 1 - i / 10 })));
+  const failSearch = (query: string) =>
+    searches.find((s) => s.query === query)!.d.reject("search failed");
+  return { thumbs, models, indexCalls, finishThumbs, listings, modelProgress, searches, answerSearch, failSearch };
 }
 
 /** Swallow (and count) console.error output from expected failures. */
@@ -281,4 +294,136 @@ test("a stale model download cannot overwrite the current download progress", as
   await tick();
   assert.equal(store.isDownloadingModel, false);
   assert.deepEqual(be.indexCalls, [{ ids: ["B"], paths: ["/thumbs/B.v3.jpg"] }]);
+});
+
+// Searches resolve in any order and can outlive the folder they were made
+// for. Only the newest search for the current folder may set the results.
+const resultIds = (store: ReturnType<typeof useLibraryStore>) =>
+  store.searchResults?.map((r) => r.image_id) ?? null;
+
+test("a slow search that resolves after a newer one does not replace its results", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const older = store.searchImages("sun");
+  await tick();
+  const newer = store.searchImages("sunset");
+  await tick();
+
+  be.answerSearch("sunset", ["A"]);
+  await newer;
+  assert.deepEqual(resultIds(store), ["A"]);
+  assert.equal(store.isSearching, false, "the newest search finished");
+
+  be.answerSearch("sun", ["X", "Y"]);
+  await older;
+  assert.deepEqual(resultIds(store), ["A"], "the stale response is dropped");
+  assert.equal(store.searchQuery, "sunset");
+  assert.equal(store.isSearching, false);
+});
+
+test("a superseded search that fails does not clear the newer results", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const older = store.searchImages("sun");
+  await tick();
+  const newer = store.searchImages("sunset");
+  await tick();
+  be.answerSearch("sunset", ["A"]);
+  await newer;
+
+  const errors = await quietly(async () => {
+    be.failSearch("sun");
+    await older;
+  });
+  assert.deepEqual(resultIds(store), ["A"]);
+  assert.equal(store.isSearching, false);
+  assert.equal(errors.length, 1, "the failure is still logged");
+});
+
+test("a search in flight when the folder changes is dropped", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const pending = store.searchImages("sunset");
+  await tick();
+  assert.equal(store.isSearching, true);
+
+  await store.loadLibrary("B");
+  await tick();
+  assert.equal(store.isSearching, false, "the new folder starts with no search running");
+
+  be.answerSearch("sunset", ["B"]);
+  await pending;
+  assert.equal(store.searchResults, null, "A's results do not apply to B");
+  assert.equal(store.searchQuery, "");
+  assert.equal(store.isSearching, false);
+  assert.deepEqual(store.displayImages.map((i) => i.id), ["B"]);
+});
+
+test("a search in flight is settled even when the next folder fails to load", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const pending = store.searchImages("sunset");
+  await tick();
+  assert.equal(store.isSearching, true);
+
+  await quietly(() => store.loadLibrary("FAIL"));
+  await tick();
+  assert.equal(store.isLoading, false);
+  assert.equal(store.isSearching, false, "the failed load still settles the search");
+
+  be.answerSearch("sunset", ["A"]);
+  await pending;
+  assert.equal(store.isSearching, false);
+  assert.equal(store.searchResults, null, "the dropped search applies nothing");
+});
+
+test("a failed load does not leave a query next to another query's results", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const first = store.searchImages("sun");
+  await tick();
+  be.answerSearch("sun", ["A"]);
+  await first;
+  assert.deepEqual(resultIds(store), ["A"]);
+
+  const pending = store.searchImages("moon");
+  await tick();
+  await quietly(() => store.loadLibrary("FAIL"));
+  await tick();
+  assert.equal(store.searchQuery, "", "the load ended the search");
+  assert.equal(store.searchResults, null);
+  assert.equal(store.isSearching, false);
+  assert.deepEqual(store.displayImages.map((i) => i.id), ["A"], "the old catalog is shown unfiltered");
+
+  be.answerSearch("moon", []);
+  await pending;
+  assert.equal(store.searchQuery, "");
+  assert.equal(store.searchResults, null, "the dropped search applies nothing");
+  assert.equal(store.isSearching, false);
+});
+
+test("clearing the search drops a search still in flight", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const pending = store.searchImages("sunset");
+  await tick();
+
+  store.clearSearch();
+  assert.equal(store.isSearching, false);
+  be.answerSearch("sunset", ["A"]);
+  await pending;
+  assert.equal(store.searchResults, null);
+  assert.equal(store.isSearching, false);
 });
