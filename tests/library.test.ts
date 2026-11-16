@@ -365,6 +365,26 @@ test("a search in flight when the folder changes is dropped", async () => {
   assert.deepEqual(store.displayImages.map((i) => i.id), ["B"]);
 });
 
+test("a search in flight is settled even when the next folder fails to load", async () => {
+  const be = backend();
+  const store = useLibraryStore();
+  await store.loadLibrary("A");
+  await tick();
+  const pending = store.searchImages("sunset");
+  await tick();
+  assert.equal(store.isSearching, true);
+
+  await quietly(() => store.loadLibrary("FAIL"));
+  await tick();
+  assert.equal(store.isLoading, false);
+  assert.equal(store.isSearching, false, "the failed load still settles the search");
+
+  be.answerSearch("sunset", ["A"]);
+  await pending;
+  assert.equal(store.isSearching, false);
+  assert.equal(store.searchResults, null, "the dropped search applies nothing");
+});
+
 test("clearing the search drops a search still in flight", async () => {
   const be = backend();
   const store = useLibraryStore();

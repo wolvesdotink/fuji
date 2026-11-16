@@ -398,6 +398,11 @@ export const useLibraryStore = defineStore("library", () => {
     isIndexing.value = false;
     indexProgress.value = { completed: 0, total: 0 };
     isIndexReady.value = false;
+    // Bumping the generation above already invalidated a search in flight,
+    // so it will never settle its own flag; settle it here. This must not
+    // wait for the listing: if the listing fails, nothing later would.
+    searchSeq++;
+    isSearching.value = false;
     isLoading.value = true;
     try {
       const home = await homeDir();
