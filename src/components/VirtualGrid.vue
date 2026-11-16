@@ -18,7 +18,7 @@
  * / `.library-grid-container`), which also holds the loading bar and the
  * empty/loading states above the grid.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, readonly, ref, toRaw, watch } from "vue";
 
 const props = withDefaults(
   defineProps<{
@@ -253,7 +253,11 @@ function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
   scrollToPosition(target);
 }
 
-defineExpose({ scrollToIndex });
+defineExpose({
+  scrollToIndex,
+  /** Current column count; reactive, readonly. */
+  columns: readonly(columns),
+});
 
 // Scroll events are handled synchronously (no rAF throttle): WebKit already
 // fires them once per frame, and updating in the same frame keeps freshly
@@ -384,6 +388,19 @@ onBeforeUnmount(() => {
   mutationObserver?.disconnect();
   mutationObserver = null;
 });
+</script>
+
+<script lang="ts">
+/**
+ * What VirtualGrid (and ImageGrid / LibraryGrid, which forward it) exposes
+ * through a template ref. After scrollToIndex() the target cards are mounted
+ * on Vue's next render: `await nextTick()` before querying them.
+ */
+export interface VirtualGridHandle {
+  scrollToIndex(index: number, block?: "nearest" | "center"): void;
+  /** Current column count. Reactive when read through the component ref. */
+  readonly columns: number;
+}
 </script>
 
 <template>
