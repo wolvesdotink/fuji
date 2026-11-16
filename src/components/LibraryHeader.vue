@@ -246,7 +246,7 @@ defineExpose({ focusSearch });
   /* Every control on the right stays whole (max-content); the left column
      keeps a fixed minimum and truncates inside it (folder name and status
      text ellipsize, the count never does); the search box gives way down to
-     120px. Below 1100px the right side switches to compact forms (see the
+     120px. Up to 1140px the right side switches to compact forms (see the
      media query at the end). Together this fits the worst realistic case
      (long folder name, model-download status, Restart button, both filters,
      camera with a long name) from 900px up without horizontal overflow. */
@@ -535,8 +535,11 @@ defineExpose({ focusSearch });
 }
 
 /* Compact header for narrow windows. Full texts stay in the tooltips and
-   accessible names. */
-@media (max-width: 1100px) {
+   accessible names. The cut-off sits 40px above the filter trigger's own
+   (1100px, LibraryFilter.vue): just above 1100px the trigger shows its full
+   summary again, and with the camera name also back the worst case ran a
+   few pixels past the window. */
+@media (max-width: 1140px) {
   .header-main {
     padding: 10px 16px;
     gap: 12px;
