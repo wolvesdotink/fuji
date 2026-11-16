@@ -1,6 +1,7 @@
 mod camera;
 mod clip;
 mod commands;
+mod imageio;
 mod index;
 mod metadata;
 mod models;

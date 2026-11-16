@@ -1,21 +1,18 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
-use rayon::prelude::*;
 use tauri::ipc::Channel;
 use tauri::State;
 use walkdir::WalkDir;
 
 use crate::clip;
 use crate::clip::engine::ClipEngine;
-use crate::commands::thumbnails::{generate_video_thumbnail, is_video_path, thumb_file_name};
+use crate::commands::thumbnails::{default_workers, generate_thumbnail_batch};
 use crate::index;
 use crate::models::{
     IndexFingerprint, IndexProgress, LibraryImage, MediaType, ModelDownloadProgress, SearchResult,
-    ThumbnailProgress,
+    ThumbnailBatch,
 };
 
 /// List photos and videos from a destination/library directory.
@@ -154,128 +151,29 @@ fn scan_library_images(dir: &Path) -> Result<(Vec<LibraryImage>, IndexFingerprin
     Ok((images, fingerprint.finish()))
 }
 
-/// Generate thumbnails for library images.
-/// Single pass: sips decodes HEIF/HIF, resizes to 600px and writes the final
-/// lossy-JPEG `{id}.v3.jpg` thumbnail directly (no temp file, no re-encode).
-/// sips preserves the EXIF orientation tag, so portrait shots render upright.
-/// Uses rayon for parallel processing.
+/// Generate thumbnails for library images (`{id}.v3.jpg` in `cache_dir`).
+/// Stills are thumbnailed in-process with ImageIO, movies through Quick Look;
+/// see `thumbnails::generate_thumbnail_batch` for batching and concurrency.
 #[tauri::command]
 pub async fn generate_library_thumbnails(
     image_paths: Vec<String>,
     image_ids: Vec<String>,
     cache_dir: String,
-    on_progress: Channel<ThumbnailProgress>,
-) -> Result<Vec<(String, String)>, String> {
+    on_progress: Channel<ThumbnailBatch>,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        generate_library_thumbnails_blocking(image_paths, image_ids, cache_dir, on_progress)
+        generate_thumbnail_batch(
+            &image_ids,
+            &image_paths,
+            Path::new(&cache_dir),
+            default_workers(),
+            &|batch| {
+                let _ = on_progress.send(batch);
+            },
+        )
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
-}
-
-fn generate_library_thumbnails_blocking(
-    image_paths: Vec<String>,
-    image_ids: Vec<String>,
-    cache_dir: String,
-    on_progress: Channel<ThumbnailProgress>,
-) -> Result<Vec<(String, String)>, String> {
-    let cache = Path::new(&cache_dir);
-
-    fs::create_dir_all(cache)
-        .map_err(|e| format!("Failed to create cache dir: {}", e))?;
-
-    let total = image_ids.len() as u32;
-    let completed = AtomicU32::new(0);
-
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get().min(4))
-        .unwrap_or(2);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .map_err(|e| format!("Failed to create thumbnail worker pool: {}", e))?;
-
-    let results: Vec<(String, String)> = pool.install(|| {
-        image_ids
-        .par_iter()
-        .zip(image_paths.par_iter())
-        .filter_map(|(image_id, image_path)| {
-            // Both pipelines write `{id}.v3.jpg` (see thumb_file_name), so a
-            // single existence check decides hit vs. miss. `.v2.*` thumbnails
-            // from the old two-step WebP path are ignored and regenerated.
-            let thumb_path = cache.join(thumb_file_name(image_id));
-
-            if !thumb_path.exists() {
-                let sips_result = if is_video_path(image_path) {
-                    generate_video_thumbnail(image_path, &thumb_path, 600).map(|_| None)
-                } else {
-                    // One sips pass: decode HEIF/HIF, resize to 600px and write
-                    // the final lossy JPEG (quality 80). Orientation is baked in.
-                    Command::new("sips")
-                        .args([
-                            "-Z",
-                            "600",
-                            "-s",
-                            "format",
-                            "jpeg",
-                            "-s",
-                            "formatOptions",
-                            "80",
-                            image_path,
-                            "--out",
-                            &thumb_path.to_string_lossy(),
-                        ])
-                        .output()
-                        .map(Some)
-                        .map_err(|e| format!("Failed to run sips: {}", e))
-                };
-
-                match sips_result {
-                    Ok(None) => {}
-                    Ok(Some(result)) if result.status.success() => {}
-                    Ok(Some(result)) => {
-                        let stderr = String::from_utf8_lossy(&result.stderr);
-                        log::error!("sips failed for {}: {}", image_id, stderr);
-                        // Remove any partial output sips may have left behind.
-                        let _ = fs::remove_file(&thumb_path);
-                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        let _ = on_progress.send(ThumbnailProgress {
-                            image_id: image_id.clone(),
-                            thumbnail_path: String::new(),
-                            completed: done,
-                            total,
-                        });
-                        return None;
-                    }
-                    Err(e) => {
-                        log::error!("Failed to generate thumbnail for {}: {}", image_id, e);
-                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                        let _ = on_progress.send(ThumbnailProgress {
-                            image_id: image_id.clone(),
-                            thumbnail_path: String::new(),
-                            completed: done,
-                            total,
-                        });
-                        return None;
-                    }
-                }
-            }
-
-            let thumb_str = thumb_path.to_string_lossy().to_string();
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = on_progress.send(ThumbnailProgress {
-                image_id: image_id.clone(),
-                thumbnail_path: thumb_str.clone(),
-                completed: done,
-                total,
-            });
-
-            Some((image_id.clone(), thumb_str))
-        })
-        .collect()
-    });
-
-    Ok(results)
 }
 
 // --- CLIP Search Commands ---

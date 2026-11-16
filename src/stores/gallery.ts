@@ -353,36 +353,36 @@ export const useGalleryStore = defineStore("gallery", () => {
   async function loadThumbnails() {
     if (!camera.value || images.value.length === 0) return;
 
-    const mediaNeedingThumbs = images.value.filter(
+    const media = images.value.filter(
       (img) => img.raf_path || img.media_type === "Video"
     );
-    if (mediaNeedingThumbs.length === 0) return;
+    if (media.length === 0) return;
 
     // Taken before any await: progress for a catalog that has since been
     // replaced lands in the discarded map instead of showing on the new
     // card's images.
-    const cam = camera.value;
     const catalogThumbs = thumbnailPaths.value;
 
     isLoadingThumbnails.value = true;
-    thumbnailProgress.value = { completed: 0, total: mediaNeedingThumbs.length };
+    thumbnailProgress.value = { completed: 0, total: media.length };
 
     const home = await homeDir();
     const cacheDir = await join(home, ".cache", "fuji-culler", "thumbs");
 
     try {
       await generateThumbnails(
-        cam.dcim_path,
-        mediaNeedingThumbs.map((img) => img.id),
-        mediaNeedingThumbs.map((img) => img.raf_path ?? img.hif_path),
+        media.map((img) => img.id),
+        media.map((img) => img.raf_path ?? img.hif_path),
         cacheDir,
-        (progress) => {
-          if (progress.thumbnail_path) {
-            catalogThumbs.set(progress.image_id, progress.thumbnail_path);
+        (batch) => {
+          // In-place .set only, never a new Map: each card tracks its own key,
+          // so only the cards in this batch recompute.
+          for (const item of batch.items) {
+            catalogThumbs.set(item.image_id, item.thumbnail_path);
           }
           thumbnailProgress.value = {
-            completed: progress.completed,
-            total: progress.total,
+            completed: batch.completed,
+            total: batch.total,
           };
         }
       );

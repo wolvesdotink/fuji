@@ -61,9 +61,18 @@ export interface PtpFileProgress {
   bytes_total: number;
 }
 
-export interface ThumbnailProgress {
+export interface ThumbnailEntry {
   image_id: string;
   thumbnail_path: string;
+}
+
+/**
+ * Coalesced thumbnail progress: cache hits arrive in large chunks and new
+ * thumbnails every few dozen files, so a warm load is a handful of messages.
+ * `completed` counts failures too; failed files are absent from `items`.
+ */
+export interface ThumbnailBatch {
+  items: ThumbnailEntry[];
   completed: number;
   total: number;
 }

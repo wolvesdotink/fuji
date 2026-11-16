@@ -4,7 +4,7 @@ import type {
   ImagePair,
   ImportSelection,
   ImportProgress,
-  ThumbnailProgress,
+  ThumbnailBatch,
   AppConfig,
   LibraryImage,
   SearchResult,
@@ -108,19 +108,22 @@ export async function ptpImportFiles(
   });
 }
 
+/**
+ * Thumbnails for a mass-storage card. `sourcePaths[i]` is the file to
+ * thumbnail for `imageIds[i]`: a RAF (its embedded preview is used), a
+ * HIF/JPEG, or a movie.
+ */
 export async function generateThumbnails(
-  dcimPath: string,
   imageIds: string[],
-  rafPaths: string[],
+  sourcePaths: string[],
   cacheDir: string,
-  onProgress: (progress: ThumbnailProgress) => void
-): Promise<[string, string][]> {
-  const channel = new Channel<ThumbnailProgress>();
+  onProgress: (batch: ThumbnailBatch) => void
+): Promise<void> {
+  const channel = new Channel<ThumbnailBatch>();
   channel.onmessage = onProgress;
   return invoke("generate_thumbnails", {
-    dcimPath,
     imageIds,
-    rafPaths,
+    sourcePaths,
     cacheDir,
     onProgress: channel,
   });
@@ -207,9 +210,9 @@ export async function generateLibraryThumbnails(
   imagePaths: string[],
   imageIds: string[],
   cacheDir: string,
-  onProgress: (progress: ThumbnailProgress) => void
-): Promise<[string, string][]> {
-  const channel = new Channel<ThumbnailProgress>();
+  onProgress: (batch: ThumbnailBatch) => void
+): Promise<void> {
+  const channel = new Channel<ThumbnailBatch>();
   channel.onmessage = onProgress;
   return invoke("generate_library_thumbnails", {
     imagePaths,

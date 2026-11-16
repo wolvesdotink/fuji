@@ -222,18 +222,19 @@ export const useLibraryStore = defineStore("library", () => {
         images.value.map((img) => img.file_path),
         images.value.map((img) => img.id),
         cacheDir,
-        (progress) => {
+        (batch) => {
           // In-place .set only — Vue wraps the Map reactively and tracks
-          // has/get per key, so only the card observing this image_id
-          // recomputes. Reassigning `new Map(...)` here invalidated every
-          // card's thumbnail lookup on each thumbnail, an O(n) storm per
-          // file → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
-          if (progress.thumbnail_path) {
-            thumbnailPaths.value.set(progress.image_id, progress.thumbnail_path);
+          // has/get per key, so only the cards observing these image_ids
+          // recompute. Reassigning `new Map(...)` here invalidated every
+          // card's thumbnail lookup on each batch, an O(n) storm per
+          // message → O(n^2) over a load. (Mirrors gallery.ts loadThumbnails.)
+          const paths = thumbnailPaths.value;
+          for (const item of batch.items) {
+            paths.set(item.image_id, item.thumbnail_path);
           }
           thumbnailProgress.value = {
-            completed: progress.completed,
-            total: progress.total,
+            completed: batch.completed,
+            total: batch.total,
           };
         }
       );
