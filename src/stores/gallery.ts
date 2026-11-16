@@ -154,6 +154,12 @@ export const useGalleryStore = defineStore("gallery", () => {
   // "bytes are moving right now".
   const ptpDownloadProgress = ref<Map<string, PtpFileProgress>>(new Map());
 
+  // Bumped on every resetCatalog(). A catalog load checks it when it returns
+  // and drops its result if it changed: the camera it read from was switched
+  // or unplugged meanwhile, even if a different card now sits at the same
+  // mount path or a same-model camera has the same PTP name.
+  let catalogGeneration = 0;
+
   /**
    * Drop everything read from the current card: its catalog, ratings,
    * thumbnails and downloaded previews. File names repeat across cards and
@@ -161,6 +167,7 @@ export const useGalleryStore = defineStore("gallery", () => {
    * card's files — imported, or deleted, from the wrong camera.
    */
   function resetCatalog() {
+    catalogGeneration++;
     images.value = [];
     ratings.value = new Map();
     thumbnailPaths.value = new Map();
@@ -249,9 +256,11 @@ export const useGalleryStore = defineStore("gallery", () => {
 
   async function loadImages() {
     if (!camera.value) return;
-    // The catalog can take most of a minute. If the camera changes meanwhile,
-    // this result belongs to the old one and must not replace the new state.
+    // The catalog can take most of a minute. If the camera changes or is
+    // unplugged meanwhile, this result belongs to the old card and must not
+    // replace the new state.
     const cam = camera.value;
+    const generation = catalogGeneration;
     loadError.value = null;
     loadErrorRaw.value = null;
     try {
@@ -266,7 +275,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         } finally {
           isCataloging.value = false;
         }
-        if (!isSameCamera(camera.value, cam)) return;
+        if (catalogGeneration !== generation) return;
         images.value = loaded;
 
         // Populate thumbnail paths from the known cache naming convention
@@ -294,7 +303,7 @@ export const useGalleryStore = defineStore("gallery", () => {
         } finally {
           isCataloging.value = false;
         }
-        if (!isSameCamera(camera.value, cam)) return;
+        if (catalogGeneration !== generation) return;
         images.value = loaded;
       }
       ratings.value = new Map();
