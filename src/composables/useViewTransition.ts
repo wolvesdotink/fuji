@@ -1,4 +1,5 @@
 import { ref, nextTick } from "vue";
+import { activeGridCursor } from "@/lib/gridCursor";
 
 // Module-level shared state — only one transition at a time
 const activeTransitionId = ref<string | null>(null);
@@ -98,9 +99,8 @@ export function useViewTransition() {
   }
 
   async function restoreGridScroll() {
-    if (savedGridScrollTop === null) return;
     const gridContainer = document.querySelector(GRID_CONTAINER_SELECTOR);
-    if (gridContainer) {
+    if (gridContainer && savedGridScrollTop !== null) {
       gridContainer.scrollTop = savedGridScrollTop;
       // The browser fires the scroll event on its next frame, after the
       // view-transition snapshot. Dispatch it now so VirtualGrid mounts the
@@ -108,6 +108,11 @@ export function useViewTransition() {
       gridContainer.dispatchEvent(new Event("scroll"));
       await nextTick();
     }
+    // The viewer may have moved far from the photo the grid was left on.
+    // The restored position stands while the current photo is fully visible
+    // in it; otherwise the grid brings it into view, so the cursor is on
+    // screen and the hero card is mounted before the snapshot.
+    await activeGridCursor.value?.reveal("return");
   }
 
   return { activeTransitionId, startTransition };

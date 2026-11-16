@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch, onUnmounted } from "vue";
+import { storeToRefs } from "pinia";
 import { useLibraryStore } from "@/stores/library";
 import LibraryCard from "./LibraryCard.vue";
 import VirtualGrid, { type VirtualGridHandle } from "./VirtualGrid.vue";
 import { describeFilters } from "@/lib/libraryFilter";
+import { useGridCursor } from "@/composables/useGridCursor";
 import type { LibraryImage } from "@/types";
 
 const store = useLibraryStore();
@@ -17,9 +19,20 @@ const grid = ref<VirtualGridHandle | null>(null);
 // Forwarded for the keyboard cursor; see VirtualGridHandle (wait a tick after
 // scrollToIndex() before querying the newly mounted cards).
 defineExpose({
-  scrollToIndex: (index: number, block?: "nearest" | "center") =>
-    grid.value?.scrollToIndex(index, block),
+  scrollToIndex: (index: number, block?: "nearest" | "center", margin?: number) =>
+    grid.value?.scrollToIndex(index, block, margin),
+  pageRows: () => grid.value?.pageRows() ?? 1,
   columns: computed(() => grid.value?.columns ?? 1),
+});
+
+// Keyboard cursor: keep currentIndex in range and its card on screen.
+const container = ref<HTMLElement | null>(null);
+useGridCursor({
+  scroller: container,
+  grid,
+  index: storeToRefs(store).currentIndex,
+  count: () => store.displayImages.length,
+  list: () => store.displayImages,
 });
 
 // Delayed show prevents the indicator from flashing on fast loads
@@ -47,7 +60,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="library-grid-container">
+  <div ref="container" class="library-grid-container">
     <div class="loading-bar" v-if="store.isLoadingThumbnails">
       <div
         class="loading-progress"
@@ -113,6 +126,8 @@ onUnmounted(() => {
       v-if="store.displayImages.length > 0"
       ref="grid"
       class="library-grid"
+      role="list"
+      aria-label="Photos and videos"
       :items="store.displayImages"
       :item-key="imageKey"
       :anchor-key="anchorKey"
