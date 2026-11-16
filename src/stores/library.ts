@@ -48,17 +48,6 @@ export const useLibraryStore = defineStore("library", () => {
   const indexProgress = ref({ completed: 0, total: 0 });
   const isIndexReady = ref(false);
 
-  // Bumped by every loadLibrary(). The background thumbnail → index chain of
-  // an older load checks it after each await and stops touching shared state
-  // once a newer load has replaced the catalog (mirrors gallery.ts's
-  // catalogGeneration).
-  let libraryGeneration = 0;
-  // Generation that last raised isDownloadingModel / isIndexing; only it
-  // lowers the flag, so a stale run cannot clear a newer run's flag, and a
-  // flag a stale run raised is not left stuck.
-  let downloadOwner = 0;
-  let indexOwner = 0;
-
   // Model download
   const isDownloadingModel = ref(false);
   const modelDownloadProgress = ref({ bytes_downloaded: 0, bytes_total: 0, file_name: "" });
@@ -169,16 +158,31 @@ export const useLibraryStore = defineStore("library", () => {
   }
 
   // Actions
+  // Bumped per loadLibrary call. Everything a load starts in the background
+  // (listing, thumbnails, CLIP index) checks it and stops touching shared
+  // state once a newer load has replaced the catalog (mirrors gallery.ts's
+  // catalogGeneration).
+  let loadGeneration = 0;
+
   async function loadLibrary(destPath: string) {
     if (!destPath) return;
-    const generation = ++libraryGeneration;
+    const generation = ++loadGeneration;
+    // The new load owns the thumbnail/index state from here on, whether or
+    // not it reaches those steps (empty folder, failed listing). Stale runs
+    // never touch these flags again, so nothing is left stuck.
+    isLoadingThumbnails.value = false;
+    thumbnailProgress.value = { completed: 0, total: 0 };
+    isDownloadingModel.value = false;
+    isIndexing.value = false;
+    indexProgress.value = { completed: 0, total: 0 };
+    isIndexReady.value = false;
     isLoading.value = true;
     try {
       const home = await homeDir();
       const indexCacheDir = await join(home, ".cache", "fuji-culler");
       const listed = await listLibraryImages(destPath, indexCacheDir);
       // A newer load started meanwhile: its catalog wins.
-      if (generation !== libraryGeneration) return;
+      if (generation !== loadGeneration) return;
       images.value = listed;
       thumbnailPaths.value = new Map();
       currentIndex.value = 0;
@@ -222,7 +226,8 @@ export const useLibraryStore = defineStore("library", () => {
     } catch (e) {
       console.error("Failed to load library:", e);
     } finally {
-      isLoading.value = false;
+      // A stale load must not hide a newer load's listing indicator.
+      if (generation === loadGeneration) isLoading.value = false;
     }
   }
 
@@ -232,11 +237,11 @@ export const useLibraryStore = defineStore("library", () => {
    * still fills its own, discarded map but no longer touches the shared
    * loading/progress state.
    */
-  async function loadThumbnails(generation = libraryGeneration) {
+  async function loadThumbnails(generation = loadGeneration) {
     // Captured before any await: this run belongs to this catalog.
     const catalog = images.value;
     const paths = thumbnailPaths.value;
-    const isCurrent = () => generation === libraryGeneration;
+    const isCurrent = () => generation === loadGeneration;
     if (catalog.length === 0 || !isCurrent()) return;
 
     isLoadingThumbnails.value = true;
@@ -289,10 +294,10 @@ export const useLibraryStore = defineStore("library", () => {
    * thumbnails. Stops after any await at which a newer load has replaced the
    * catalog, so a stale run never indexes (or marks ready) another catalog.
    */
-  async function buildSearchIndex(generation = libraryGeneration) {
+  async function buildSearchIndex(generation = loadGeneration) {
     const catalog = images.value;
     const paths = thumbnailPaths.value;
-    const isCurrent = () => generation === libraryGeneration;
+    const isCurrent = () => generation === loadGeneration;
     if (catalog.length === 0 || !isCurrent()) return;
 
     const home = await homeDir();
@@ -301,23 +306,22 @@ export const useLibraryStore = defineStore("library", () => {
     if (!isCurrent()) return;
 
     // Ensure models are downloaded.
-    downloadOwner = generation;
     isDownloadingModel.value = true;
+    modelDownloadProgress.value = { bytes_downloaded: 0, bytes_total: 0, file_name: "" };
     try {
       await ensureClipModels(modelDir, (progress) => {
-        modelDownloadProgress.value = progress;
+        if (isCurrent()) modelDownloadProgress.value = progress;
       });
     } catch (e) {
       console.error("Failed to download CLIP models:", e);
       return;
     } finally {
-      if (downloadOwner === generation) isDownloadingModel.value = false;
+      if (isCurrent()) isDownloadingModel.value = false;
     }
     // The download can take minutes; the folder may have changed meanwhile.
     if (!isCurrent()) return;
 
     // Build index from thumbnails
-    indexOwner = generation;
     isIndexing.value = true;
     indexProgress.value = { completed: 0, total: catalog.length };
 
@@ -339,7 +343,7 @@ export const useLibraryStore = defineStore("library", () => {
     } catch (e) {
       console.error("Failed to build search index:", e);
     } finally {
-      if (indexOwner === generation) isIndexing.value = false;
+      if (isCurrent()) isIndexing.value = false;
     }
   }
 
