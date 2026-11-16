@@ -5,6 +5,7 @@ import { useAppStore } from "@/stores/app";
 import { useLibraryStore } from "@/stores/library";
 import { useGalleryStore } from "@/stores/gallery";
 import UpdateButton from "@/components/UpdateButton.vue";
+import LibraryFilter from "@/components/LibraryFilter.vue";
 
 const appStore = useAppStore();
 const libraryStore = useLibraryStore();
@@ -21,8 +22,9 @@ const folderName = computed(() => {
 
 const cameraConnected = computed(() => galleryStore.camera !== null);
 
+// "48 media" normally; "12 of 48 media" while a search or filter narrows it.
 const imageCount = computed(() => {
-  if (libraryStore.searchResults) {
+  if (libraryStore.searchResults || libraryStore.isFiltered) {
     return `${libraryStore.displayImages.length} of ${libraryStore.images.length}`;
   }
   return `${libraryStore.images.length}`;
@@ -101,7 +103,7 @@ defineExpose({ focusSearch });
           </button>
         </div>
         <div class="header-meta">
-          <span class="image-count">{{ imageCount }} media</span>
+          <span class="image-count" aria-live="polite">{{ imageCount }} media</span>
           <template v-if="indexStatusText">
             <span class="meta-sep">&middot;</span>
             <span class="index-status">
@@ -145,6 +147,8 @@ defineExpose({ focusSearch });
 
       <div class="header-right">
         <UpdateButton />
+
+        <LibraryFilter />
 
         <div class="sort-toggle">
           <button
@@ -215,7 +219,11 @@ defineExpose({ focusSearch });
 
 .header-main {
   display: grid;
-  grid-template-columns: 1fr minmax(200px, 400px) 1fr;
+  /* Side columns never shrink below their content; the search box gives way
+     first (down to 160px) so the count and the controls stay visible in a
+     900px window. A plain 1fr let the search box grow to 400px before the
+     side columns were sized, which pushed the count under it. */
+  grid-template-columns: minmax(max-content, 1fr) minmax(160px, 400px) minmax(max-content, 1fr);
   align-items: center;
   padding: 10px 20px;
   gap: 16px;
@@ -240,6 +248,9 @@ defineExpose({ focusSearch });
 }
 
 .folder-name {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   background: none;
   border: none;
   font-weight: 600;
@@ -259,6 +270,7 @@ defineExpose({ focusSearch });
 }
 
 .header-meta {
+  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -459,6 +471,12 @@ defineExpose({ focusSearch });
   background: var(--color-heif);
   box-shadow: 0 0 6px rgba(61, 148, 101, 0.4);
   flex-shrink: 0;
+}
+
+@media (max-width: 1100px) {
+  .folder-name {
+    max-width: 150px;
+  }
 }
 
 @keyframes spin {
