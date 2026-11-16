@@ -516,7 +516,10 @@ export function useLoupe({ stage, photoId, image, ready, failed, enabled }: Loup
   // scale at its start, or at the last re-base — so it is exact however
   // slowly the fingers move: zoom = refZoom × scale / refScale, clamped.
   // The reference is re-based when the photo becomes zoomable mid-gesture
-  // (at the zoom just applied and the gesture's current scale).
+  // (at the zoom just applied and the gesture's current scale), and whenever
+  // the target runs into a limit (fit or the maximum): the fingers can keep
+  // moving past a limit, and without a re-base a reversal would first have
+  // to unwind that overshoot before the photo responded.
 
   function rebaseGesture(l: Layout) {
     if (!gesture) return;
@@ -539,7 +542,13 @@ export function useLoupe({ stage, photoId, image, ready, failed, enabled }: Loup
     const p = stagePoint(g);
     const l = rec.layout;
     if (l && gesture.refZoom !== null) {
-      zoomAt(l, (gesture.refZoom * g.scale) / gesture.refScale, p.x, p.y);
+      const target = (gesture.refZoom * g.scale) / gesture.refScale;
+      zoomAt(l, target, p.x, p.y);
+      const limit = clamp(target, fitZoom(l), maxZoom(l));
+      if (limit !== target) {
+        gesture.refZoom = limit;
+        gesture.refScale = g.scale;
+      }
     } else if (g.scale !== gesture.lastScale) {
       preloadIntent(g.scale > gesture.lastScale, p.fx, p.fy);
     }

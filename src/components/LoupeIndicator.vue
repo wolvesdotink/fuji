@@ -5,8 +5,9 @@
  * full-resolution image instead of showing a scaled-up placeholder.
  */
 defineProps<{
-  /** Zoom in percent (100 = one image pixel per screen pixel); null at fit,
-   *  or while a wheel/pinch zoom waits for the image to know its level. */
+  /** Zoom in percent (100 = one image pixel per screen pixel); null at fit
+   *  and when the image failed to load. A zoom requested before the image is
+   *  ready reads 100, its target. */
   percent: number | null;
   /** Zoom requested but the full-resolution image hasn't loaded yet. */
   loading: boolean;
