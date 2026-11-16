@@ -140,9 +140,13 @@ export const useLibraryStore = defineStore("library", () => {
    * Per-media histogram of ratings (index 0 = unrated, 1-5 = stars) over the
    * current search scope, ignoring the filters themselves. Feeds the counts
    * in the filter popover; only evaluated while something renders it.
+   *
+   * Live ratings, not the viewer's frozen snapshot: the counts predict what
+   * clicking an option gives, and changing a filter refreshes the snapshot
+   * to live ratings (see changeFilters).
    */
   const filterCounts = computed(() => {
-    const r = frozenRatings.value ?? ratings.value;
+    const r = ratings.value;
     const scores = searchResults.value ? searchScores.value : null;
     const photo = [0, 0, 0, 0, 0, 0];
     const video = [0, 0, 0, 0, 0, 0];
@@ -174,8 +178,11 @@ export const useLibraryStore = defineStore("library", () => {
    * longer listed, land on the nearest one that is, preferring the photos
    * that came after it.
    */
-  function reanchor(prevList: LibraryImage[], prevIndex: number) {
-    const list = displayImages.value;
+  function reanchor(
+    prevList: LibraryImage[],
+    prevIndex: number,
+    list: LibraryImage[] = displayImages.value
+  ) {
     const prev = prevList[prevIndex];
     if (list.length === 0 || !prev) {
       currentIndex.value = 0;
@@ -222,7 +229,9 @@ export const useLibraryStore = defineStore("library", () => {
         frozenRatings.value = new Map(ratings.value);
         // Nothing to show (empty search or filters): the viewer would render
         // blank, so stay on the grid, which explains why it is empty.
-        if (displayImages.value.length === 0) viewMode.value = "grid";
+        const len = displayImages.value.length;
+        if (len === 0) viewMode.value = "grid";
+        else if (currentIndex.value >= len) currentIndex.value = len - 1;
         return;
       }
       if (!frozenRatings.value) return;
@@ -252,6 +261,47 @@ export const useLibraryStore = defineStore("library", () => {
       viewMode.value = "grid";
     }
   }
+
+  // Set by callers that pick the selection themselves while replacing the
+  // list (new search, cleared search, new folder), so the reconciler below
+  // only range-checks their choice instead of re-anchoring over it.
+  let selectionReset = false;
+
+  function resetSelection() {
+    currentIndex.value = 0;
+    selectionReset = true;
+  }
+
+  // The selection invariant, owned here: currentIndex is a valid index of
+  // displayImages, or the list is empty and the view is the grid (a viewer
+  // with no current image renders blank, and G/Esc, which act on the current
+  // image, could not leave it).
+  //
+  // Filter changes and leaving the viewer re-anchor synchronously above;
+  // this catches every other change to the list's membership or order:
+  // ratings read from disk landing late, search results arriving or
+  // clearing, a sort change, a new catalog. When the list changed and nobody
+  // chose an index, follow the photo that was current (or its nearest
+  // surviving neighbour), so the selection never silently points at
+  // whatever slid into its old slot.
+  //
+  // flush "pre" (the default) batches: hydrating thousands of ratings is one
+  // reconcile before the next render, not one per rating. Nothing user-driven
+  // can run between the change and the flush.
+  watch([displayImages, currentIndex], ([list, idx], [prevList, prevIdx]) => {
+    const reset = selectionReset;
+    selectionReset = false;
+    if (list.length === 0) {
+      currentIndex.value = 0;
+      if (viewMode.value === "single") viewMode.value = "grid";
+      return;
+    }
+    if (!reset && list !== prevList && idx === prevIdx && prevList) {
+      reanchor(prevList, prevIdx, list);
+    } else if (idx >= list.length || idx < 0) {
+      currentIndex.value = list.length - 1;
+    }
+  });
 
   function setRatingFilter(f: RatingFilter) {
     if (f !== ratingFilter.value) changeFilters(() => (ratingFilter.value = f));
@@ -304,15 +354,27 @@ export const useLibraryStore = defineStore("library", () => {
   }
 
   // Actions
+  // Bumped per loadLibrary call so a slow ratings read for a folder the user
+  // already left cannot apply its ratings to the new folder's images.
+  let loadGeneration = 0;
+
   async function loadLibrary(destPath: string) {
     if (!destPath) return;
+    const generation = ++loadGeneration;
+    // Leave the viewer before the catalog changes. Going to grid also drops
+    // the frozen ratings snapshot, which holds the previous folder's paths
+    // and would otherwise filter and sort the new folder against them.
+    viewMode.value = "grid";
     isLoading.value = true;
     try {
       const home = await homeDir();
       const indexCacheDir = await join(home, ".cache", "fuji-culler");
-      images.value = await listLibraryImages(destPath, indexCacheDir);
+      const listed = await listLibraryImages(destPath, indexCacheDir);
+      if (generation !== loadGeneration) return;
+      viewMode.value = "grid";
+      images.value = listed;
       thumbnailPaths.value = new Map();
-      currentIndex.value = 0;
+      resetSelection();
       searchResults.value = null;
       searchQuery.value = "";
       ratings.value = new Map();
@@ -325,9 +387,11 @@ export const useLibraryStore = defineStore("library", () => {
         const filePaths = images.value.map((img) => img.file_path);
         readFileRatings(filePaths, indexCacheDir)
           .then((fileRatings) => {
+            if (generation !== loadGeneration) return;
             // Build the id → image lookup once (O(n)). The previous
             // images.value.find() per returned rating was O(n) each, i.e.
             // O(n^2) across a full library of camera-set ratings.
+            const hydrated: [string, number][] = [];
             const imageById = new Map(images.value.map((i) => [i.id, i]));
             const imageByStem = new Map(
               images.value.map((i) => [i.file_name.replace(/\.[^.]+$/, ""), i])
@@ -336,7 +400,20 @@ export const useLibraryStore = defineStore("library", () => {
               const img = imageById.get(stem) ?? imageByStem.get(stem);
               if (img) {
                 ratings.value.set(img.file_path, rating);
+                hydrated.push([img.file_path, rating]);
               }
+            }
+            // Opened the viewer before the read finished: these are the
+            // files' own ratings, not edits made in the viewer, so fold them
+            // into the snapshot too (the reconciler then keeps the selection
+            // valid). Viewer edits still waiting to be written keep theirs.
+            const frozen = frozenRatings.value;
+            if (frozen && hydrated.length > 0) {
+              const next = new Map(frozen);
+              for (const [path, rating] of hydrated) {
+                if (!pendingWrites.has(path)) next.set(path, rating);
+              }
+              frozenRatings.value = next;
             }
           })
           .catch((e) => console.error("Failed to read library ratings:", e));
@@ -472,7 +549,7 @@ export const useLibraryStore = defineStore("library", () => {
       );
 
       searchResults.value = await searchLibrary(query, modelDir, indexPath);
-      currentIndex.value = 0;
+      resetSelection();
     } catch (e) {
       console.error("Search failed:", e);
       searchResults.value = [];
@@ -484,7 +561,7 @@ export const useLibraryStore = defineStore("library", () => {
   function clearSearch() {
     searchQuery.value = "";
     searchResults.value = null;
-    currentIndex.value = 0;
+    resetSelection();
   }
 
   // Flush pending writes before page unload
