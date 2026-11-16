@@ -173,6 +173,7 @@ export const useLibraryStore = defineStore("library", () => {
     isLoadingThumbnails.value = false;
     thumbnailProgress.value = { completed: 0, total: 0 };
     isDownloadingModel.value = false;
+    modelDownloadProgress.value = { bytes_downloaded: 0, bytes_total: 0, file_name: "" };
     isIndexing.value = false;
     indexProgress.value = { completed: 0, total: 0 };
     isIndexReady.value = false;

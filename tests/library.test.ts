@@ -223,6 +223,14 @@ test("a stale listing does not clear the newer load's loading indicator", async 
     store.images.map((i: { id: string }) => i.id),
     ["slowB"]
   );
+  // Let B's background thumbnail → index chain finish before the mocks are
+  // torn down; otherwise its pending IPC calls land on a cleared mock.
+  await tick();
+  be.finishThumbs("slowB");
+  await tick();
+  be.models[0].resolve(null);
+  await tick();
+  assert.equal(store.isIndexReady, true);
 });
 
 test("a new folder is not reported as indexed until its own index is built", async () => {
