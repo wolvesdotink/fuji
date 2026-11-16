@@ -7,6 +7,8 @@ import type { LibraryImage } from "@/types";
 
 const store = useLibraryStore();
 const imageKey = (image: LibraryImage) => image.id;
+// Unique per file across library reloads (ids are stems and can repeat).
+const anchorKey = (image: LibraryImage) => image.file_path;
 
 const grid = ref<VirtualGridHandle | null>(null);
 // Forwarded for the keyboard cursor; see VirtualGridHandle (wait a tick after
@@ -98,6 +100,7 @@ onUnmounted(() => {
       class="library-grid"
       :items="store.displayImages"
       :item-key="imageKey"
+      :anchor-key="anchorKey"
     >
       <template #default="{ item, index }">
         <LibraryCard :image="item" :index="index" />

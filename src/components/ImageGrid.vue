@@ -7,6 +7,8 @@ import type { ImagePair } from "@/types";
 
 const store = useGalleryStore();
 const imageKey = (image: ImagePair) => image.id;
+// Unique per file across catalog reloads (ids are stems and can repeat).
+const anchorKey = (image: ImagePair) => image.hif_path;
 
 const grid = ref<VirtualGridHandle | null>(null);
 // Forwarded for the keyboard cursor; see VirtualGridHandle (wait a tick after
@@ -27,7 +29,13 @@ defineExpose({
       ></div>
     </div>
 
-    <VirtualGrid ref="grid" class="image-grid" :items="store.images" :item-key="imageKey">
+    <VirtualGrid
+      ref="grid"
+      class="image-grid"
+      :items="store.images"
+      :item-key="imageKey"
+      :anchor-key="anchorKey"
+    >
       <template #default="{ item, index }">
         <ImageCard :image="item" :index="index" />
       </template>

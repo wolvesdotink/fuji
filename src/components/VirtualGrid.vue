@@ -24,6 +24,13 @@ const props = withDefaults(
   defineProps<{
     items: readonly T[];
     itemKey: (item: T) => string;
+    /**
+     * A stable, unique identity for the item across reloads (a full file
+     * path, not the stem-only id). Lets the scroll anchor survive a list of
+     * freshly created records for the same files; without it the anchor
+     * follows object identity only.
+     */
+    anchorKey?: (item: T) => string;
     /** Rows mounted above and below the visible ones. */
     overscan?: number;
   }>(),
@@ -115,9 +122,10 @@ function update() {
 // and correct a second time. So the grid owns anchoring completely.
 //
 // The anchor is the user's place in item terms: the first item of the first
-// visible row (by object identity, with its index as a fallback, since ids can
-// repeat across folders) and the unrounded pixel offset of that row from the
-// viewport top. It is recorded only from user scrolling and from positions set
+// visible row and the unrounded pixel offset of that row from the viewport
+// top. After a list change the item is found again by object identity, then
+// by `anchorKey` (fresh records for the same files), then by its nearest
+// surviving neighbour in the previous list. It is recorded only from user scrolling and from positions set
 // deliberately (the viewer's scroll restore, scrollToIndex). Whenever the
 // item → pixel mapping changes (column count or row height, the list, or the
 // content above the grid) the anchor is re-applied, never re-derived from the
@@ -138,10 +146,18 @@ let anchor: Anchor | null = null;
 /** The scrollTop the grid last wrote itself; its scroll events aren't the user's. */
 let programmaticTop: number | null = null;
 
-// Identity → index for the current list, rebuilt once per list change so the
-// anchor lookup after a reorder is O(1).
+// Identity → index and anchorKey → index for the current list, rebuilt once
+// per list change so the anchor lookup after a reorder is O(1).
 let listItems: readonly T[] = [];
 let indexOf = new Map<unknown, number>();
+let keyIndexOf = new Map<string, number>();
+
+/** Index of `item` (or of a fresh record for the same file) in the current list. */
+function resolveIndex(item: T): number | undefined {
+  const hit = indexOf.get(toRaw(item));
+  if (hit !== undefined || !props.anchorKey) return hit;
+  return keyIndexOf.get(props.anchorKey(item));
+}
 
 function recordAnchor() {
   if (!scrollEl || rowHeight.value <= 0) return;
@@ -168,7 +184,7 @@ function anchorTarget(a: Anchor): number {
     const contentEnd = offset + totalRows.value * rowPitch.value - rowGap.value + padBottom;
     return Math.max(contentEnd - scrollEl.clientHeight, 0);
   }
-  const hit = indexOf.get(toRaw(a.item));
+  const hit = resolveIndex(a.item);
   const index = hit ?? Math.min(Math.max(a.index, 0), Math.max(props.items.length - 1, 0));
   a.index = index;
   return offset + Math.floor(index / columns.value) * rowPitch.value + a.offset;
@@ -279,42 +295,40 @@ function onScroll(e: Event) {
 }
 
 /**
- * The list changed. Same items in a new order (a sort, ratings arriving
- * under the Stars sort), inserts and removals keep the anchored item where it
- * was. If the anchored item itself is gone, use its nearest surviving
- * neighbour in the previous list, else the item now at its old index. A list
- * that shares no item with the previous one (a new catalog) starts at the top.
+ * The list changed. Find the anchored item again: the same object (a sort,
+ * ratings arriving under the Stars sort, inserts and removals elsewhere), else
+ * a fresh record for the same file by `anchorKey` (the same folder or catalog
+ * reloaded). If it is gone, take its nearest surviving neighbour in the
+ * previous list, following side first so a removal doesn't shift the view;
+ * the scan covers the whole previous list, once per change. Only a list with
+ * no survivor at all (a different folder or card) starts at the top.
  */
 function onListChange(prevItems: readonly T[], prevIndexOf: Map<unknown, number>) {
   if (!anchor || prevItems.length === 0) {
     update();
     return;
   }
-  const raw = toRaw(anchor.item);
-  if (!indexOf.has(raw)) {
-    let survivor: T | undefined;
-    // Nearest surviving neighbour; bounded so a list change stays O(n).
-    for (let d = 1; d <= 512 && !survivor; d++) {
-      // Following neighbour first: after a removal it slides into the slot.
-      for (const i of [anchor.index + d, anchor.index - d]) {
-        const candidate = prevItems[i];
-        if (candidate !== undefined && indexOf.has(toRaw(candidate))) {
-          survivor = candidate;
+  let index = resolveIndex(anchor.item);
+  if (index === undefined) {
+    const from = prevIndexOf.get(toRaw(anchor.item)) ?? anchor.index;
+    for (let d = 1; index === undefined && (from + d < prevItems.length || from - d >= 0); d++) {
+      for (const i of [from + d, from - d]) {
+        if (i < 0 || i >= prevItems.length) continue;
+        const hit = resolveIndex(prevItems[i]);
+        if (hit !== undefined) {
+          index = hit;
           break;
         }
       }
     }
-    if (survivor === undefined) {
-      const sharesItems = props.items.some((item) => prevIndexOf.has(toRaw(item)));
-      if (!sharesItems) {
-        anchor = null;
-        scrollToPosition(0);
-        return;
-      }
-      survivor = props.items[Math.min(anchor.index, props.items.length - 1)];
+    if (index === undefined) {
+      anchor = null;
+      scrollToPosition(0);
+      return;
     }
-    anchor.item = survivor;
   }
+  anchor.item = props.items[index];
+  anchor.index = index;
   reanchor();
 }
 
@@ -370,6 +384,8 @@ watch(
     const prevIndexOf = indexOf;
     listItems = props.items.slice();
     indexOf = new Map(listItems.map((item, i) => [toRaw(item), i]));
+    const anchorKey = props.anchorKey;
+    keyIndexOf = anchorKey ? new Map(listItems.map((item, i) => [anchorKey(item), i])) : new Map();
     if (rowHeight.value === 0) {
       // Nothing measured yet: render one item so the watcher above can.
       endRow.value = 1;
