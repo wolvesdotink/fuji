@@ -18,7 +18,7 @@
  * / `.library-grid-container`), which also holds the loading bar and the
  * empty/loading states above the grid.
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 
 const props = withDefaults(
   defineProps<{
@@ -101,72 +101,139 @@ function setWindow(scrollTop: number) {
   endRow.value = Math.max(Math.min(last, totalRows.value), startRow.value + 1);
 }
 
-/**
- * Where the user is, in item terms: the first item of the first visible row,
- * how far (as a fraction of the row pitch) that row is scrolled past the top,
- * and whether the view sits at the very bottom. Recorded on every update,
- * while the geometry and the DOM agree, so a resize can restore it. Null at
- * the top of the grid, where keeping the pixel position is already right.
- */
-let anchor: { index: number; fraction: number; atBottom: boolean } | null = null;
+/** Mount the rows for the current scroll position. */
+function update() {
+  if (!scrollEl || rowHeight.value <= 0) return;
+  setWindow(scrollEl.scrollTop);
+}
+
+// ---------------------------------------------------------------------------
+// Scroll anchoring
+//
+// Browser scroll anchoring is off for the grid (see the style block): with
+// padding standing in for unmounted rows it would pick the wrong reference
+// and correct a second time. So the grid owns anchoring completely.
+//
+// The anchor is the user's place in item terms: the first item of the first
+// visible row (by object identity, with its index as a fallback, since ids can
+// repeat across folders) and the unrounded pixel offset of that row from the
+// viewport top. It is recorded only from user scrolling and from positions set
+// deliberately (the viewer's scroll restore, scrollToIndex). Whenever the
+// item → pixel mapping changes (column count or row height, the list, or the
+// content above the grid) the anchor is re-applied, never re-derived from the
+// rounded scrollTop that results, so repeated changes don't drift.
+// ---------------------------------------------------------------------------
+
+interface Anchor {
+  item: T;
+  /** Index of `item` when last resolved; the fallback if it disappears. */
+  index: number;
+  /** Pixels from the top of the item's row to the top of the viewport. */
+  offset: number;
+  atBottom: boolean;
+}
+
+/** Null at the top of the grid: there the pixel position is already right. */
+let anchor: Anchor | null = null;
+/** The scrollTop the grid last wrote itself; its scroll events aren't the user's. */
+let programmaticTop: number | null = null;
+
+// Identity → index for the current list, rebuilt once per list change so the
+// anchor lookup after a reorder is O(1).
+let listItems: readonly T[] = [];
+let indexOf = new Map<unknown, number>();
 
 function recordAnchor() {
-  if (!scrollEl) return;
+  if (!scrollEl || rowHeight.value <= 0) return;
   const top = scrollEl.scrollTop - gridOffset();
-  if (scrollEl.scrollTop <= 0 || top <= 0) {
+  if (scrollEl.scrollTop <= 0 || top <= 0 || props.items.length === 0) {
     anchor = null;
     return;
   }
-  const row = Math.floor(top / rowPitch.value);
+  const row = Math.min(Math.floor(top / rowPitch.value), totalRows.value - 1);
+  const index = row * columns.value;
   anchor = {
-    index: row * columns.value,
-    fraction: (top - row * rowPitch.value) / rowPitch.value,
+    item: props.items[index],
+    index,
+    offset: top - row * rowPitch.value,
     atBottom: scrollEl.scrollTop >= scrollEl.scrollHeight - scrollEl.clientHeight - 1,
   };
 }
 
-/** Recompute which rows are mounted from the current scroll position. */
-function update() {
-  if (!scrollEl || rowHeight.value <= 0) return;
-  setWindow(scrollEl.scrollTop);
-  recordAnchor();
+/** Where the anchor puts the viewport top, in scroll-container pixels. */
+function anchorTarget(a: Anchor): number {
+  const offset = gridOffset();
+  if (a.atBottom && scrollEl) {
+    const padBottom = parseFloat(getComputedStyle(scrollEl).paddingBottom) || 0;
+    const contentEnd = offset + totalRows.value * rowPitch.value - rowGap.value + padBottom;
+    return Math.max(contentEnd - scrollEl.clientHeight, 0);
+  }
+  const hit = indexOf.get(toRaw(a.item));
+  const index = hit ?? Math.min(Math.max(a.index, 0), Math.max(props.items.length - 1, 0));
+  a.index = index;
+  return offset + Math.floor(index / columns.value) * rowPitch.value + a.offset;
 }
 
+let reanchorQueued = false;
+
 /**
- * Re-read the geometry. If the column count or row pitch changed (window
- * resize, font load) while scrolled into the grid, put the anchored item back
- * where it was: a fixed pixel scrollTop would land on different photos.
- * Unchanged geometry, including the first measurement on mount, leaves the
- * scroll position alone, so the viewer's scroll restore is never overridden.
+ * Re-apply the anchor after the item → pixel mapping changed. The rows for
+ * the target are mounted right away; scrollTop is written after Vue has
+ * patched the padding (until then the content is sized for the old mapping
+ * and the browser would clamp it). Both happen before the next paint.
  */
-function remeasure() {
-  const before = rowHeight.value > 0 ? { columns: columns.value, pitch: rowPitch.value } : null;
-  const saved = anchor;
-  measure();
-  const changed =
-    before !== null &&
-    (before.columns !== columns.value || Math.abs(before.pitch - rowPitch.value) > 0.01);
-  if (!changed || !saved || !scrollEl) {
+function reanchor() {
+  if (!scrollEl || rowHeight.value <= 0) return;
+  if (!anchor) {
     update();
     return;
   }
-  const target = saved.atBottom
-    ? Number.MAX_SAFE_INTEGER
-    : gridOffset() + Math.floor(saved.index / columns.value) * rowPitch.value + saved.fraction * rowPitch.value;
-  // Mount the target rows first: until Vue patches the padding, the content
-  // is still sized for the old geometry and the browser would clamp scrollTop.
-  setWindow(target);
+  setWindow(anchorTarget(anchor));
+  if (reanchorQueued) return;
+  reanchorQueued = true;
   nextTick(() => {
-    if (!scrollEl) return;
-    scrollEl.scrollTop = saved.atBottom ? scrollEl.scrollHeight : target;
+    reanchorQueued = false;
+    if (!scrollEl || !anchor) return;
+    const max = scrollEl.scrollHeight - scrollEl.clientHeight;
+    // Rounded only here: WebKit keeps integral scroll positions and would
+    // truncate a fraction. The anchor itself stays unrounded.
+    const target = Math.round(anchor.atBottom ? max : Math.min(anchorTarget(anchor), max));
+    if (scrollEl.scrollTop !== target) scrollEl.scrollTop = target;
+    programmaticTop = scrollEl.scrollTop;
     update();
   });
+}
+
+/** Write scrollTop and make that position the new anchor. */
+function scrollToPosition(scrollTop: number) {
+  if (!scrollEl) return;
+  scrollEl.scrollTop = Math.round(Math.max(scrollTop, 0));
+  programmaticTop = scrollEl.scrollTop;
+  recordAnchor();
+  update();
+}
+
+/**
+ * Re-read the geometry; re-apply the anchor if the column count or row
+ * height changed. Unchanged geometry, including the first measurement on
+ * mount, leaves scrollTop alone.
+ */
+function remeasure() {
+  const before = rowHeight.value > 0 ? { columns: columns.value, pitch: rowPitch.value } : null;
+  measure();
+  const changed =
+    before !== null &&
+    (before.columns !== columns.value || Math.abs(before.pitch - rowPitch.value) > 0.001);
+  if (changed) reanchor();
+  else update();
 }
 
 /**
  * Scroll so that item `index` is visible. `block: "nearest"` scrolls the
  * least amount needed (nothing if it is already fully visible); `"center"`
- * centres its row. The new rows are mounted synchronously.
+ * centres its row. The rows are mounted synchronously, but the cards are in
+ * the DOM only after Vue's next render: wait a tick (`await nextTick()`)
+ * before querying them.
  */
 function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
   if (!scrollEl || rowHeight.value <= 0 || index < 0 || index >= props.items.length) return;
@@ -183,22 +250,72 @@ function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
   } else if (rowBottom > viewTop + viewHeight) {
     target = rowBottom - viewHeight;
   }
-  scrollEl.scrollTop = Math.max(target, 0);
-  update();
+  scrollToPosition(target);
 }
 
 defineExpose({ scrollToIndex });
 
 // Scroll events are handled synchronously (no rAF throttle): WebKit already
 // fires them once per frame, and updating in the same frame keeps freshly
-// exposed rows from being painted blank. It also lets useViewTransition
-// restore a scroll position and have the matching rows mounted before the
-// view-transition snapshot is taken.
-function onScroll() {
+// exposed rows from being painted blank. useViewTransition restores a scroll
+// position by dispatching a synthetic scroll event, so the matching rows are
+// mounted before the view-transition snapshot; an untrusted event is taken as
+// such a deliberate position and always sets the anchor.
+function onScroll(e: Event) {
+  if (!scrollEl || rowHeight.value <= 0) return;
+  const echo =
+    e.isTrusted &&
+    programmaticTop !== null &&
+    Math.abs(scrollEl.scrollTop - programmaticTop) < 0.5;
+  if (!echo) {
+    programmaticTop = null;
+    recordAnchor();
+  }
   update();
 }
 
+/**
+ * The list changed. Same items in a new order (a sort, ratings arriving
+ * under the Stars sort), inserts and removals keep the anchored item where it
+ * was. If the anchored item itself is gone, use its nearest surviving
+ * neighbour in the previous list, else the item now at its old index. A list
+ * that shares no item with the previous one (a new catalog) starts at the top.
+ */
+function onListChange(prevItems: readonly T[], prevIndexOf: Map<unknown, number>) {
+  if (!anchor || prevItems.length === 0) {
+    update();
+    return;
+  }
+  const raw = toRaw(anchor.item);
+  if (!indexOf.has(raw)) {
+    let survivor: T | undefined;
+    // Nearest surviving neighbour; bounded so a list change stays O(n).
+    for (let d = 1; d <= 512 && !survivor; d++) {
+      // Following neighbour first: after a removal it slides into the slot.
+      for (const i of [anchor.index + d, anchor.index - d]) {
+        const candidate = prevItems[i];
+        if (candidate !== undefined && indexOf.has(toRaw(candidate))) {
+          survivor = candidate;
+          break;
+        }
+      }
+    }
+    if (survivor === undefined) {
+      const sharesItems = props.items.some((item) => prevIndexOf.has(toRaw(item)));
+      if (!sharesItems) {
+        anchor = null;
+        scrollToPosition(0);
+        return;
+      }
+      survivor = props.items[Math.min(anchor.index, props.items.length - 1)];
+    }
+    anchor.item = survivor;
+  }
+  reanchor();
+}
+
 let resizeObserver: ResizeObserver | null = null;
+let mutationObserver: MutationObserver | null = null;
 
 onMounted(() => {
   scrollEl = gridEl.value?.parentElement ?? null;
@@ -222,6 +339,14 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(remeasure);
   if (scrollEl) resizeObserver.observe(scrollEl);
   document.fonts.addEventListener("loadingdone", remeasure);
+
+  // Content above the grid in the scroll container (the thumbnail loading
+  // bar, the library loading indicator) comes and goes as direct children;
+  // that moves every row, so keep the anchored item in place.
+  if (scrollEl) {
+    mutationObserver = new MutationObserver(reanchor);
+    mutationObserver.observe(scrollEl, { childList: true });
+  }
 });
 
 watch(
@@ -235,17 +360,20 @@ watch(
 );
 
 watch(
-  () => props.items.length,
+  [() => props.items, () => props.items.length],
   () => {
+    const prevItems = listItems;
+    const prevIndexOf = indexOf;
+    listItems = props.items.slice();
+    indexOf = new Map(listItems.map((item, i) => [toRaw(item), i]));
     if (rowHeight.value === 0) {
       // Nothing measured yet: render one item so the watcher above can.
       endRow.value = 1;
       return;
     }
-    // The list may have shrunk below (or grown past) the current window.
-    update();
+    onListChange(prevItems, prevIndexOf);
   },
-  { flush: "post" }
+  { immediate: true }
 );
 
 onBeforeUnmount(() => {
@@ -253,6 +381,8 @@ onBeforeUnmount(() => {
   document.fonts.removeEventListener("loadingdone", remeasure);
   resizeObserver?.disconnect();
   resizeObserver = null;
+  mutationObserver?.disconnect();
+  mutationObserver = null;
 });
 </script>
 
@@ -269,9 +399,9 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 14px;
-  /* remeasure() keeps the user's place across geometry changes itself. The
-     browser's scroll anchoring would adjust scrollTop a second time when the
-     padding changes. */
+  /* The component anchors the scroll position itself (see "Scroll
+     anchoring" above); the browser's anchoring would correct a second time
+     whenever the padding changes. */
   overflow-anchor: none;
 }
 </style>
