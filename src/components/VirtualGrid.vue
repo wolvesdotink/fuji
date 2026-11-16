@@ -247,20 +247,22 @@ function remeasure() {
 /**
  * Scroll so that item `index` is visible. `block: "nearest"` scrolls the
  * least amount needed (nothing if it is already fully visible); `"center"`
- * centres its row. The rows are mounted synchronously, but the cards are in
+ * centres its row. `margin` (pixels) is kept clear above or below the row
+ * with "nearest", for decorations drawn outside the card such as the keyboard
+ * cursor's ring. The rows are mounted synchronously, but the cards are in
  * the DOM only after Vue's next render: wait a tick (`await nextTick()`)
  * before querying them.
  */
-function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
+function scrollToIndex(index: number, block: "nearest" | "center" = "nearest", margin = 0) {
   if (!scrollEl || rowHeight.value <= 0 || index < 0 || index >= props.items.length) return;
   const row = Math.floor(index / columns.value);
-  const rowTop = gridOffset() + row * rowPitch.value;
-  const rowBottom = rowTop + rowHeight.value;
+  const rowTop = gridOffset() + row * rowPitch.value - margin;
+  const rowBottom = rowTop + rowHeight.value + 2 * margin;
   const viewTop = scrollEl.scrollTop;
   const viewHeight = scrollEl.clientHeight;
   let target = viewTop;
   if (block === "center") {
-    target = rowTop - (viewHeight - rowHeight.value) / 2;
+    target = rowTop + margin - (viewHeight - rowHeight.value) / 2;
   } else if (rowTop < viewTop) {
     target = rowTop;
   } else if (rowBottom > viewTop + viewHeight) {
@@ -269,8 +271,15 @@ function scrollToIndex(index: number, block: "nearest" | "center" = "nearest") {
   scrollToPosition(target);
 }
 
+/** Rows that fit in the viewport (at least 1): the step for Page Up / Page Down. */
+function pageRows(): number {
+  if (!scrollEl || rowPitch.value <= 0) return 1;
+  return Math.max(Math.floor((scrollEl.clientHeight + rowGap.value) / rowPitch.value), 1);
+}
+
 defineExpose({
   scrollToIndex,
+  pageRows,
   /** Current column count; reactive, readonly. */
   columns: readonly(columns),
 });
@@ -413,7 +422,9 @@ onBeforeUnmount(() => {
  * on Vue's next render: `await nextTick()` before querying them.
  */
 export interface VirtualGridHandle {
-  scrollToIndex(index: number, block?: "nearest" | "center"): void;
+  scrollToIndex(index: number, block?: "nearest" | "center", margin?: number): void;
+  /** Rows that fit in the viewport (at least 1). */
+  pageRows(): number;
   /** Current column count. Reactive when read through the component ref. */
   readonly columns: number;
 }
